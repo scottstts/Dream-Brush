@@ -13,8 +13,8 @@ We’re building a native iOS proof-of-concept app that lets you scan an interio
 - Renders the 3DGS in AR with correct relocalization/alignment to the physical space.
 - Provides simple “style” controls (appearance-only, lightweight; no heavy ML needed for Part 1).
 
-**Non-goals for Part 1:**
-- On-device 3DGS training (that’s Part 2).
+**Non-goals for this dev plan:**
+- On-device 3DGS training (that’s after this dev plan).
 - Cloud/GPU backend services.
 - Complex diffusion stylization.
 - Multi-user shared AR persistence.
