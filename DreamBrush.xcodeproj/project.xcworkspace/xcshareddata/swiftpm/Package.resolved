@@ -1,0 +1,15 @@
+{
+  "originHash" : "eeabeec04cc0bd9e6b254818ca8b5f2dca030b5b89b830749fe9fabeed198770",
+  "pins" : [
+    {
+      "identity" : "metalsplatter",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/scier/MetalSplatter.git",
+      "state" : {
+        "revision" : "221348301cae5e14388410b9ed080c3d61cbfbbc",
+        "version" : "0.1.1"
+      }
+    }
+  ],
+  "version" : 3
+}

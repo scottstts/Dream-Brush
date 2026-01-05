@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D20C664A2F0C54CF00790B94 /* MetalSplatter in Frameworks */ = {isa = PBXBuildFile; productRef = D2A5C2812F0C50000066EECA /* MetalSplatter */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		D2A5C2562F0C46340066EECA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D20C664A2F0C54CF00790B94 /* MetalSplatter in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = DreamBrush;
 			packageProductDependencies = (
+				D2A5C2812F0C50000066EECA /* MetalSplatter */,
 			);
 			productName = DreamBrush;
 			productReference = D2A5C2482F0C46340066EECA /* DreamBrush.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = D2A5C23F2F0C46340066EECA;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D2A5C2802F0C50000066EECA /* XCRemoteSwiftPackageReference "MetalSplatter" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D2A5C2492F0C46340066EECA /* Products */;
 			projectDirPath = "";
@@ -582,6 +591,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D2A5C2802F0C50000066EECA /* XCRemoteSwiftPackageReference "MetalSplatter" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/scier/MetalSplatter.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D2A5C2812F0C50000066EECA /* MetalSplatter */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D2A5C2802F0C50000066EECA /* XCRemoteSwiftPackageReference "MetalSplatter" */;
+			productName = MetalSplatter;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D2A5C2402F0C46340066EECA /* Project object */;
 }

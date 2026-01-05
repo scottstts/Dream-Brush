@@ -1,0 +1,219 @@
+//
+//  CaptureBundle.swift
+//  DreamBrush
+//
+//  Created by Scott Sun on 2026/1/5.
+//
+
+import Foundation
+import UIKit
+
+struct CaptureBundle: Identifiable, Codable {
+    var id: String { manifest.bundleId }
+
+    let manifest: CaptureManifest
+    let bundleURL: URL
+
+    var thumbnail: UIImage? {
+        let thumbURL = bundleURL.appendingPathComponent("thumb.jpg")
+        guard let data = try? Data(contentsOf: thumbURL) else { return nil }
+        return UIImage(data: data)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case manifest
+        case bundleURL
+    }
+}
+
+struct CaptureManifest: Codable {
+    let version: String
+    let bundleId: String
+    let createdAt: Date
+    let appVersion: String
+    let appBuild: String
+    let iosVersion: String
+    let deviceModel: String
+    let deviceName: String
+
+    let captureSettings: CaptureSettings
+    var captureStats: CaptureStats
+    let coordinateConventions: CoordinateConventions
+
+    static let currentVersion = "1.0"
+
+    init(
+        bundleId: String = UUID().uuidString,
+        captureSettings: CaptureSettings = CaptureSettings()
+    ) {
+        self.version = Self.currentVersion
+        self.bundleId = bundleId
+        self.createdAt = Date()
+        self.appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        self.appBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        self.iosVersion = UIDevice.current.systemVersion
+        self.deviceModel = Self.deviceModelIdentifier()
+        self.deviceName = UIDevice.current.name
+        self.captureSettings = captureSettings
+        self.captureStats = CaptureStats()
+        self.coordinateConventions = CoordinateConventions()
+    }
+
+    private static func deviceModelIdentifier() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machineMirror = Mirror(reflecting: systemInfo.machine)
+        return machineMirror.children.reduce("") { identifier, element in
+            guard let value = element.value as? Int8, value != 0 else { return identifier }
+            return identifier + String(UnicodeScalar(UInt8(value)))
+        }
+    }
+}
+
+struct CaptureSettings: Codable {
+    let targetFPS: Int
+    let depthEnabled: Bool
+    let meshReconstructionEnabled: Bool
+    let smoothedDepth: Bool
+
+    init(
+        targetFPS: Int = 10,
+        depthEnabled: Bool = true,
+        meshReconstructionEnabled: Bool = false,
+        smoothedDepth: Bool = true
+    ) {
+        self.targetFPS = targetFPS
+        self.depthEnabled = depthEnabled
+        self.meshReconstructionEnabled = meshReconstructionEnabled
+        self.smoothedDepth = smoothedDepth
+    }
+}
+
+struct CaptureStats: Codable {
+    var durationSeconds: Double
+    var frameCount: Int
+    var keyframeCount: Int
+    var depthFrameCount: Int
+    var averageTrackingQuality: Double
+    var finalMappingStatus: String
+    var estimatedSizeBytes: Int64
+
+    init() {
+        self.durationSeconds = 0
+        self.frameCount = 0
+        self.keyframeCount = 0
+        self.depthFrameCount = 0
+        self.averageTrackingQuality = 0
+        self.finalMappingStatus = "notAvailable"
+        self.estimatedSizeBytes = 0
+    }
+}
+
+struct CoordinateConventions: Codable {
+    let handedness: String
+    let matrixLayout: String
+    let transformDirection: String
+    let upAxis: String
+    let units: String
+
+    init() {
+        self.handedness = "right"
+        self.matrixLayout = "column_major"
+        self.transformDirection = "camera_to_world"
+        self.upAxis = "Y"
+        self.units = "meters"
+    }
+}
+
+struct AnchorData: Codable {
+    let rootAnchor: AnchorInfo
+    let additionalAnchors: [AnchorInfo]
+
+    init(rootAnchor: AnchorInfo) {
+        self.rootAnchor = rootAnchor
+        self.additionalAnchors = []
+    }
+}
+
+struct AnchorInfo: Codable {
+    let id: String
+    let name: String
+    let transform: [[Float]]
+    let createdAt: Date
+    let trackingState: String
+
+    init(
+        id: String = UUID().uuidString,
+        name: String = "CaptureOrigin",
+        transform: [[Float]] = [
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ],
+        trackingState: String = "normal"
+    ) {
+        self.id = id
+        self.name = name
+        self.transform = transform
+        self.createdAt = Date()
+        self.trackingState = trackingState
+    }
+}
+
+struct FrameMetadata: Codable {
+    let frameIndex: Int
+    let timestamp: Double
+    let timestampSinceStart: Double
+
+    let camera: CameraMetadata
+    let tracking: TrackingMetadata
+    let depth: DepthMetadata?
+    let exposure: ExposureMetadata?
+
+    var isKeyframe: Bool
+}
+
+struct CameraMetadata: Codable {
+    let intrinsics: [[Float]]
+    let imageResolution: ImageResolution
+    let transform: [[Float]]
+    let projectionMatrix: [[Float]]
+    let eulerAngles: EulerAngles
+}
+
+struct ImageResolution: Codable {
+    let width: Int
+    let height: Int
+}
+
+struct EulerAngles: Codable {
+    let pitch: Float
+    let yaw: Float
+    let roll: Float
+}
+
+struct TrackingMetadata: Codable {
+    let state: String
+    let stateReason: String
+    let worldMappingStatus: String
+}
+
+struct DepthMetadata: Codable {
+    let available: Bool
+    let width: Int
+    let height: Int
+    let confidenceSummary: ConfidenceSummary
+}
+
+struct ConfidenceSummary: Codable {
+    let high: Float
+    let medium: Float
+    let low: Float
+}
+
+struct ExposureMetadata: Codable {
+    let duration: Double
+    let iso: Float
+    let whiteBalance: Int
+}

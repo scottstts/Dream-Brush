@@ -8,14 +8,42 @@
 import SwiftUI
 
 struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+    @State private var selectedTab: Tab = .capture
+
+    enum Tab: String, CaseIterable {
+        case capture = "Capture"
+        case viewer = "Viewer"
+        case library = "Library"
+
+        var icon: String {
+            switch self {
+            case .capture: return "camera.viewfinder"
+            case .viewer: return "cube.transparent"
+            case .library: return "folder"
+            }
         }
-        .padding()
+    }
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            CaptureView()
+                .tabItem {
+                    Label(Tab.capture.rawValue, systemImage: Tab.capture.icon)
+                }
+                .tag(Tab.capture)
+
+            ViewerView()
+                .tabItem {
+                    Label(Tab.viewer.rawValue, systemImage: Tab.viewer.icon)
+                }
+                .tag(Tab.viewer)
+
+            LibraryView()
+                .tabItem {
+                    Label(Tab.library.rawValue, systemImage: Tab.library.icon)
+                }
+                .tag(Tab.library)
+        }
     }
 }
 
