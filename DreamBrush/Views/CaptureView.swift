@@ -77,21 +77,11 @@ struct CaptureView: View {
             HStack(spacing: 12) {
                 ForEach(recentBundles.prefix(3)) { bundle in
                     VStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.secondary.opacity(0.2))
-                            .frame(width: 60, height: 60)
-                            .overlay {
-                                if let thumb = bundle.thumbnail {
-                                    Image(uiImage: thumb)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fill)
-                                        .frame(width: 60, height: 60)
-                                        .cornerRadius(8)
-                                } else {
-                                    Image(systemName: "photo.stack")
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
+                        BundleThumbnailView(
+                            bundle: bundle,
+                            size: 60,
+                            placeholderSystemImage: "photo.stack"
+                        )
 
                         Text("\(bundle.manifest.captureStats.frameCount)")
                             .font(.caption2)
@@ -106,7 +96,12 @@ struct CaptureView: View {
     }
 
     private func loadRecentBundles() {
-        recentBundles = CaptureBundleManager.shared.listBundles()
+        Task {
+            let bundles = await CaptureBundleManager.shared.listBundlesAsync()
+            await MainActor.run {
+                recentBundles = bundles
+            }
+        }
     }
 }
 

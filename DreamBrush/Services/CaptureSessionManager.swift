@@ -28,6 +28,32 @@ final class CaptureSessionManager: NSObject {
     var recordingDuration: TimeInterval = 0
     var depthAvailabilityRate: Double = 0
 
+    // Relocalization tracking
+    var hasReachedMappedStatus = false
+    var rootAnchorSet = false
+    private var rootAnchor: ARAnchor?
+    private var rootAnchorTransform: simd_float4x4?
+
+    /// Whether the scan can be finalized (mapping status is good enough)
+    var canFinalizeScan: Bool {
+        worldMappingStatus == .mapped || worldMappingStatus == .extending
+    }
+
+    /// Human-readable reason why scan cannot be finalized
+    var finalizationBlockedReason: String? {
+        guard isRecording else { return nil }
+        switch worldMappingStatus {
+        case .notAvailable:
+            return "Waiting for AR tracking to start..."
+        case .limited:
+            return "Move around to map more of the space"
+        case .extending, .mapped:
+            return nil
+        @unknown default:
+            return "Unknown mapping status"
+        }
+    }
+
     // MARK: - Configuration
 
     struct CaptureConfig {
@@ -55,13 +81,15 @@ final class CaptureSessionManager: NSObject {
     private var frameIndex = 0
     private var totalFramesWithDepth = 0
     private var totalFramesProcessed = 0
+    private var totalFramesWithGoodTracking = 0
+    private var totalDepthConfidence: Double = 0
+    private var depthConfidenceCount = 0
 
     // Frame writing queue
     private let writeQueue = DispatchQueue(label: "com.scottsun.DreamBrush.frameWriter", qos: .userInitiated)
 
     // Reusable CIContext for image processing (expensive to create)
-    // Note: Using nonisolated(unsafe) since CIContext is thread-safe
-    private nonisolated(unsafe) static let sharedCIContext: CIContext = {
+    private static let sharedCIContext: CIContext = {
         CIContext(options: [
             .useSoftwareRenderer: false,
             .cacheIntermediates: false // Reduce memory usage
@@ -192,6 +220,15 @@ final class CaptureSessionManager: NSObject {
         estimatedStorageBytes = 0
         totalFramesWithDepth = 0
         totalFramesProcessed = 0
+        totalFramesWithGoodTracking = 0
+        totalDepthConfidence = 0
+        depthConfidenceCount = 0
+
+        // Reset relocalization tracking
+        hasReachedMappedStatus = false
+        rootAnchorSet = false
+        rootAnchor = nil
+        rootAnchorTransform = nil
 
         isRecording = true
         logger.info("Started recording to bundle: \(bundle.manifest.bundleId)")
@@ -209,7 +246,43 @@ final class CaptureSessionManager: NSObject {
         // Calculate final stats
         let duration = Date().timeIntervalSince(recordingStartTime ?? Date())
 
-        // Update manifest with final stats
+        // Save ARWorldMap for relocalization
+        var worldMapSaved = false
+        var worldMapFeatureCount: Int?
+        if let session = session {
+            do {
+                let worldMap = try await getWorldMap(from: session)
+                try CaptureBundleManager.shared.writeWorldMap(worldMap, to: bundle.bundleURL)
+                worldMapSaved = true
+                // ARWorldMap doesn't expose feature count directly, but we can estimate from anchors
+                worldMapFeatureCount = worldMap.anchors.count
+                logger.info("Saved ARWorldMap with \(worldMap.anchors.count) anchors")
+            } catch {
+                logger.error("Failed to save world map: \(error.localizedDescription)")
+            }
+        }
+
+        // Save root anchor data
+        let anchorData = buildAnchorData()
+        try CaptureBundleManager.shared.writeAnchors(anchorData, to: bundle.bundleURL)
+
+        // Calculate relocalization quality metrics
+        let goodTrackingPercentage = totalFramesProcessed > 0
+            ? Double(totalFramesWithGoodTracking) / Double(totalFramesProcessed)
+            : 0
+        let averageDepthConfidence = depthConfidenceCount > 0
+            ? totalDepthConfidence / Double(depthConfidenceCount)
+            : 0
+
+        let relocalizationQuality = RelocalizationQuality(
+            goodTrackingPercentage: goodTrackingPercentage,
+            mappingStatusReached: hasReachedMappedStatus,
+            averageDepthConfidence: averageDepthConfidence,
+            worldMapSaved: worldMapSaved,
+            worldMapFeatureCount: worldMapFeatureCount
+        )
+
+        // Update manifest with final stats and relocalization quality
         var updatedBundle = bundle
         try CaptureBundleManager.shared.updateManifest(for: &updatedBundle) { manifest in
             manifest.captureStats.durationSeconds = duration
@@ -219,14 +292,199 @@ final class CaptureSessionManager: NSObject {
             manifest.captureStats.estimatedSizeBytes = estimatedStorageBytes
             manifest.captureStats.averageTrackingQuality = calculateAverageTrackingQuality()
             manifest.captureStats.finalMappingStatus = worldMappingStatus.description
+            manifest.relocalizationQuality = relocalizationQuality
         }
 
-        logger.info("Stopped recording. Frames: \(self.frameCount), Keyframes: \(self.keyframeCount), Depth: \(self.depthFrameCount)")
+        logger.info("Stopped recording. Frames: \(self.frameCount), Keyframes: \(self.keyframeCount), Depth: \(self.depthFrameCount), WorldMapSaved: \(worldMapSaved)")
 
         currentBundle = nil
         recordingStartTime = nil
 
         return updatedBundle
+    }
+
+    /// Retrieves the current ARWorldMap from the session
+    private func getWorldMap(from session: ARSession) async throws -> ARWorldMap {
+        try await withCheckedThrowingContinuation { continuation in
+            session.getCurrentWorldMap { worldMap, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else if let worldMap = worldMap {
+                    continuation.resume(returning: worldMap)
+                } else {
+                    continuation.resume(throwing: CaptureError.worldMapNotAvailable)
+                }
+            }
+        }
+    }
+
+    /// Builds anchor data including the root anchor
+    private func buildAnchorData() -> AnchorData {
+        let rootAnchorInfo: AnchorInfo
+        if let transform = rootAnchorTransform {
+            rootAnchorInfo = AnchorInfo(
+                id: rootAnchor?.identifier.uuidString ?? UUID().uuidString,
+                name: "CaptureOrigin",
+                transform: simdToArray(transform),
+                trackingState: "normal"
+            )
+        } else {
+            // Fallback to identity if no root anchor was set
+            rootAnchorInfo = AnchorInfo()
+        }
+        return AnchorData(rootAnchor: rootAnchorInfo)
+    }
+
+    /// Converts simd_float4x4 to nested Float array for JSON serialization
+    private func simdToArray(_ matrix: simd_float4x4) -> [[Float]] {
+        [
+            [matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z, matrix.columns.0.w],
+            [matrix.columns.1.x, matrix.columns.1.y, matrix.columns.1.z, matrix.columns.1.w],
+            [matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z, matrix.columns.2.w],
+            [matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z, matrix.columns.3.w]
+        ]
+    }
+
+    // MARK: - Relocalization Testing
+
+    /// State for relocalization testing
+    var isTestingRelocalization = false
+    var relocalizationTestStartTime: Date?
+    var relocalizationTestStatus: String = ""
+    private var relocalizationAnchorFound = false
+    private var expectedAnchorName = "CaptureOrigin"
+
+    /// Tests relocalization by loading a saved world map and waiting for ARKit to relocalize
+    /// - Parameters:
+    ///   - bundle: The capture bundle to test relocalization for
+    ///   - timeout: Maximum time to wait for relocalization (default 30 seconds)
+    /// - Returns: The result of the relocalization test
+    func testRelocalization(for bundle: CaptureBundle, timeout: TimeInterval = 30) async throws -> RelocalizationTestResult {
+        guard !isRecording else {
+            throw CaptureError.relocalizationFailed("Cannot test while recording")
+        }
+
+        // Load the world map
+        let worldMap: ARWorldMap
+        do {
+            worldMap = try CaptureBundleManager.shared.loadWorldMap(from: bundle.bundleURL)
+        } catch {
+            return RelocalizationTestResult(
+                success: false,
+                notes: "Failed to load world map: \(error.localizedDescription)"
+            )
+        }
+
+        // Configure session with the loaded world map
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.initialWorldMap = worldMap
+
+        if config.enableDepth && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            if config.enableSmoothedDepth && ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+                configuration.frameSemantics.insert(.smoothedSceneDepth)
+            } else {
+                configuration.frameSemantics.insert(.sceneDepth)
+            }
+        }
+
+        configuration.planeDetection = [.horizontal, .vertical]
+        configuration.environmentTexturing = .automatic
+        configuration.isAutoFocusEnabled = true
+
+        // Start relocalization test
+        isTestingRelocalization = true
+        relocalizationTestStartTime = Date()
+        relocalizationTestStatus = "Starting relocalization test..."
+        relocalizationAnchorFound = false // Reset anchor detection flag
+
+        guard let session = session else {
+            isTestingRelocalization = false
+            throw CaptureError.sessionNotRunning
+        }
+
+        // Run session with the world map
+        session.run(configuration, options: [.resetTracking])
+        isSessionRunning = true
+        logger.info("Started relocalization test for bundle: \(bundle.manifest.bundleId)")
+
+        // Wait for relocalization with timeout
+        let result = await waitForRelocalization(timeout: timeout)
+
+        isTestingRelocalization = false
+        relocalizationTestStatus = result.success ? "Relocalization successful!" : "Relocalization failed"
+
+        logger.info("Relocalization test completed: \(result.success ? "SUCCESS" : "FAILED")")
+
+        return result
+    }
+
+    /// Waits for relocalization to complete or timeout
+    /// Relocalization is considered successful when BOTH:
+    /// 1. Tracking state becomes .normal (not .limited(.relocalizing))
+    /// 2. The saved "CaptureOrigin" anchor is detected by ARKit
+    private func waitForRelocalization(timeout: TimeInterval) async -> RelocalizationTestResult {
+        let startTime = Date()
+
+        // Poll for relocalization status
+        while Date().timeIntervalSince(startTime) < timeout {
+            // Check if tracking is normal AND we found the original anchor
+            // Both conditions are required for true relocalization success
+            if case .normal = trackingState, relocalizationAnchorFound {
+                let timeToRelocalize = Date().timeIntervalSince(startTime)
+                return RelocalizationTestResult(
+                    success: true,
+                    timeToRelocalize: timeToRelocalize,
+                    trackingStateAfterRelocalization: "normal",
+                    notes: "Successfully relocalized to original capture location in \(String(format: "%.1f", timeToRelocalize)) seconds"
+                )
+            }
+
+            // Update status for UI based on current state
+            if case .limited(let reason) = trackingState {
+                switch reason {
+                case .relocalizing:
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    relocalizationTestStatus = "Relocalizing... (\(String(format: "%.0f", elapsed))s)"
+                case .initializing:
+                    relocalizationTestStatus = "Initializing AR session..."
+                case .excessiveMotion:
+                    relocalizationTestStatus = "Slow down - excessive motion detected"
+                case .insufficientFeatures:
+                    relocalizationTestStatus = "Move to area with more visual features"
+                @unknown default:
+                    relocalizationTestStatus = "Limited tracking..."
+                }
+            } else if case .normal = trackingState {
+                // Tracking is normal but anchor not found yet - we're in a different location
+                let elapsed = Date().timeIntervalSince(startTime)
+                relocalizationTestStatus = "Searching for original location... (\(String(format: "%.0f", elapsed))s)"
+            }
+
+            // Small delay to avoid busy-waiting
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+        }
+
+        // Timeout reached - provide informative failure message
+        var failureNotes = "Relocalization timed out after \(Int(timeout)) seconds."
+        if case .normal = trackingState {
+            failureNotes += " Tracking was stable but original capture location was not found. Make sure you're in the same physical space where the scan was captured."
+        } else {
+            failureNotes += " Tracking state: \(trackingState.description)"
+        }
+
+        return RelocalizationTestResult(
+            success: false,
+            timeToRelocalize: nil,
+            trackingStateAfterRelocalization: trackingState.description,
+            notes: failureNotes
+        )
+    }
+
+    /// Cancels an ongoing relocalization test
+    func cancelRelocalizationTest() {
+        isTestingRelocalization = false
+        relocalizationTestStatus = "Test cancelled"
+        logger.info("Relocalization test cancelled")
     }
 
     private func calculateAverageTrackingQuality() -> Double {
@@ -318,8 +576,6 @@ final class CaptureSessionManager: NSObject {
             logger.error("Failed to capture frame data for index \(currentFrameIndex)")
             return
         }
-
-        let hasDepth = capturedData.depthData != nil
 
         // Now safely process on background queue
         writeQueue.async { [weak self] in
@@ -653,8 +909,38 @@ extension CaptureSessionManager: ARSessionDelegate {
         trackingState = frame.camera.trackingState
         worldMappingStatus = frame.worldMappingStatus
 
+        // Track when mapping status reaches .mapped
+        if isRecording && worldMappingStatus == .mapped && !hasReachedMappedStatus {
+            hasReachedMappedStatus = true
+            logger.info("World mapping status reached .mapped")
+        }
+
+        // Set root anchor when tracking is good and mapping is sufficient
+        if isRecording && !rootAnchorSet {
+            setRootAnchorIfReady(frame: frame, session: session)
+        }
+
+        // Track quality metrics
+        if isRecording {
+            updateQualityMetrics(frame: frame)
+        }
+
         // Process frame if recording
         processFrame(frame)
+    }
+
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        // During relocalization testing, check if our saved anchors are being found
+        if isTestingRelocalization {
+            for anchor in anchors {
+                // When ARKit successfully relocalizes, it will add anchors from the saved world map
+                // Our CaptureOrigin anchor being added means relocalization found the original location
+                if anchor.name == expectedAnchorName {
+                    relocalizationAnchorFound = true
+                    logger.info("Relocalization anchor '\(self.expectedAnchorName)' found!")
+                }
+            }
+        }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -668,6 +954,43 @@ extension CaptureSessionManager: ARSessionDelegate {
     func sessionInterruptionEnded(_ session: ARSession) {
         logger.info("ARSession interruption ended")
     }
+
+    // MARK: - Root Anchor Management
+
+    /// Sets the root anchor when conditions are met:
+    /// - Tracking is normal
+    /// - World mapping is at least .extending (preferably .mapped)
+    private func setRootAnchorIfReady(frame: ARFrame, session: ARSession) {
+        guard trackingState == .normal else { return }
+        guard worldMappingStatus == .extending || worldMappingStatus == .mapped else { return }
+
+        // Use the current camera pose as the root anchor
+        let cameraPose = frame.camera.transform
+        let anchor = ARAnchor(name: "CaptureOrigin", transform: cameraPose)
+
+        session.add(anchor: anchor)
+        rootAnchor = anchor
+        rootAnchorTransform = cameraPose
+        rootAnchorSet = true
+
+        logger.info("Root anchor set at camera pose, mapping status: \(self.worldMappingStatus.description)")
+    }
+
+    /// Updates quality metrics during recording
+    private func updateQualityMetrics(frame: ARFrame) {
+        // Track good tracking frames
+        if trackingState == .normal {
+            totalFramesWithGoodTracking += 1
+        }
+
+        // Track depth confidence
+        if let confidenceMap = frame.smoothedSceneDepth?.confidenceMap ?? frame.sceneDepth?.confidenceMap {
+            let summary = calculateConfidenceSummary(confidenceMap)
+            // Use high confidence percentage as the metric
+            totalDepthConfidence += Double(summary.high)
+            depthConfidenceCount += 1
+        }
+    }
 }
 
 // MARK: - Error Types
@@ -677,6 +1000,8 @@ enum CaptureError: LocalizedError {
     case notRecording
     case imageConversionFailed
     case depthConversionFailed
+    case worldMapNotAvailable
+    case relocalizationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -684,6 +1009,8 @@ enum CaptureError: LocalizedError {
         case .notRecording: return "Not currently recording"
         case .imageConversionFailed: return "Failed to convert image"
         case .depthConversionFailed: return "Failed to convert depth map"
+        case .worldMapNotAvailable: return "World map is not available"
+        case .relocalizationFailed(let reason): return "Relocalization failed: \(reason)"
         }
     }
 }

@@ -47,15 +47,15 @@ struct CaptureSessionView: View {
         .onDisappear {
             sessionManager.pauseSession()
         }
-        .alert("Stop Recording?", isPresented: $showingStopConfirmation) {
+        .alert("Finalize Scan?", isPresented: $showingStopConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Stop & Save", role: .destructive) {
+            Button("Finalize & Save") {
                 Task {
                     await stopRecording()
                 }
             }
         } message: {
-            Text("This will finalize the capture bundle with \(sessionManager.frameCount) frames.")
+            Text(finalizationMessage)
         }
         .alert("Error", isPresented: $showingError) {
             Button("OK", role: .cancel) {}
@@ -136,12 +136,15 @@ struct CaptureSessionView: View {
                 Text(formatDuration(sessionManager.recordingDuration))
                     .font(.system(size: 48, weight: .light, design: .monospaced))
                     .foregroundStyle(.white)
+
+                // Relocalization status indicators
+                relocalizationStatusView
             }
 
             // Main control button
             HStack(spacing: 40) {
                 if sessionManager.isRecording {
-                    // Stop button
+                    // Stop/Finalize button
                     Button(action: { showingStopConfirmation = true }) {
                         ZStack {
                             Circle()
@@ -149,7 +152,7 @@ struct CaptureSessionView: View {
                                 .frame(width: 80, height: 80)
 
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(.red)
+                                .fill(sessionManager.canFinalizeScan ? .green : .orange)
                                 .frame(width: 32, height: 32)
                         }
                     }
@@ -177,12 +180,47 @@ struct CaptureSessionView: View {
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.8))
             } else {
-                Text("Move slowly around the space")
+                Text(sessionManager.finalizationBlockedReason ?? "Tap square to finalize scan")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.8))
             }
         }
         .padding(.horizontal)
+    }
+
+    // MARK: - Relocalization Status View
+
+    private var relocalizationStatusView: some View {
+        HStack(spacing: 12) {
+            // Root anchor indicator
+            HStack(spacing: 4) {
+                Image(systemName: sessionManager.rootAnchorSet ? "mappin.circle.fill" : "mappin.circle")
+                    .foregroundStyle(sessionManager.rootAnchorSet ? .green : .gray)
+                Text("Anchor")
+                    .font(.caption2)
+            }
+
+            // Mapping status indicator
+            HStack(spacing: 4) {
+                Image(systemName: sessionManager.hasReachedMappedStatus ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(sessionManager.hasReachedMappedStatus ? .green : .yellow)
+                Text("Mapped")
+                    .font(.caption2)
+            }
+
+            // World map readiness
+            HStack(spacing: 4) {
+                Image(systemName: sessionManager.canFinalizeScan ? "globe.americas.fill" : "globe.americas")
+                    .foregroundStyle(sessionManager.canFinalizeScan ? .green : .orange)
+                Text("World Map")
+                    .font(.caption2)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
     }
 
     // MARK: - Recording Overlay
@@ -218,6 +256,20 @@ struct CaptureSessionView: View {
     private var canStartRecording: Bool {
         sessionManager.isSessionRunning &&
             sessionManager.trackingState == .normal
+    }
+
+    private var finalizationMessage: String {
+        var message = "This will save the capture bundle with \(sessionManager.frameCount) frames"
+
+        if sessionManager.hasReachedMappedStatus {
+            message += " and world map for relocalization."
+        } else if sessionManager.worldMappingStatus == .extending {
+            message += ".\n\nNote: Mapping is still extending. For best relocalization, consider scanning more of the space."
+        } else {
+            message += ".\n\nWarning: Mapping status is limited. Relocalization may not work well."
+        }
+
+        return message
     }
 
     // MARK: - Actions

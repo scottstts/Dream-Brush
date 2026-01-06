@@ -26,6 +26,8 @@ struct ARViewContainer: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
-        // Session is managed externally
+        if uiView.session !== session {
+            uiView.session = session
+        }
     }
 }

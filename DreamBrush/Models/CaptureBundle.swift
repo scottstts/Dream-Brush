@@ -39,6 +39,7 @@ struct CaptureManifest: Codable {
     let captureSettings: CaptureSettings
     var captureStats: CaptureStats
     let coordinateConventions: CoordinateConventions
+    var relocalizationQuality: RelocalizationQuality?
 
     static let currentVersion = "1.0"
 
@@ -57,6 +58,7 @@ struct CaptureManifest: Codable {
         self.captureSettings = captureSettings
         self.captureStats = CaptureStats()
         self.coordinateConventions = CoordinateConventions()
+        self.relocalizationQuality = nil
     }
 
     private static func deviceModelIdentifier() -> String {
@@ -106,6 +108,99 @@ struct CaptureStats: Codable {
         self.averageTrackingQuality = 0
         self.finalMappingStatus = "notAvailable"
         self.estimatedSizeBytes = 0
+    }
+}
+
+/// Summary of relocalization quality metrics for a capture bundle
+struct RelocalizationQuality: Codable {
+    /// Percentage of frames with good tracking (0.0-1.0)
+    let goodTrackingPercentage: Double
+    /// Whether the mapping status reached .mapped during capture
+    let mappingStatusReached: Bool
+    /// Average depth confidence across all depth frames (0.0-1.0)
+    let averageDepthConfidence: Double
+    /// Whether an ARWorldMap was successfully saved
+    let worldMapSaved: Bool
+    /// Total feature points in the saved world map (if available)
+    let worldMapFeatureCount: Int?
+    /// Timestamp when relocalization was last tested (nil if never tested)
+    var lastRelocalizationTestDate: Date?
+    /// Result of the last relocalization test (nil if never tested)
+    var lastRelocalizationTestResult: RelocalizationTestResult?
+
+    init(
+        goodTrackingPercentage: Double = 0,
+        mappingStatusReached: Bool = false,
+        averageDepthConfidence: Double = 0,
+        worldMapSaved: Bool = false,
+        worldMapFeatureCount: Int? = nil,
+        lastRelocalizationTestDate: Date? = nil,
+        lastRelocalizationTestResult: RelocalizationTestResult? = nil
+    ) {
+        self.goodTrackingPercentage = goodTrackingPercentage
+        self.mappingStatusReached = mappingStatusReached
+        self.averageDepthConfidence = averageDepthConfidence
+        self.worldMapSaved = worldMapSaved
+        self.worldMapFeatureCount = worldMapFeatureCount
+        self.lastRelocalizationTestDate = lastRelocalizationTestDate
+        self.lastRelocalizationTestResult = lastRelocalizationTestResult
+    }
+
+    /// Overall quality score (0.0-1.0) based on all metrics
+    var overallScore: Double {
+        var score = 0.0
+        var weights = 0.0
+
+        // World map saved is critical (40% weight)
+        if worldMapSaved {
+            score += 0.4
+        }
+        weights += 0.4
+
+        // Mapping status reached (30% weight)
+        if mappingStatusReached {
+            score += 0.3
+        }
+        weights += 0.3
+
+        // Good tracking percentage (20% weight)
+        score += goodTrackingPercentage * 0.2
+        weights += 0.2
+
+        // Depth confidence (10% weight)
+        score += averageDepthConfidence * 0.1
+        weights += 0.1
+
+        return weights > 0 ? score / weights : 0
+    }
+
+    /// Human-readable quality assessment
+    var qualityAssessment: String {
+        let score = overallScore
+        if score >= 0.8 { return "Excellent" }
+        if score >= 0.6 { return "Good" }
+        if score >= 0.4 { return "Fair" }
+        return "Poor"
+    }
+}
+
+/// Result of a relocalization test
+struct RelocalizationTestResult: Codable {
+    let success: Bool
+    let timeToRelocalize: TimeInterval?
+    let trackingStateAfterRelocalization: String?
+    let notes: String?
+
+    init(
+        success: Bool,
+        timeToRelocalize: TimeInterval? = nil,
+        trackingStateAfterRelocalization: String? = nil,
+        notes: String? = nil
+    ) {
+        self.success = success
+        self.timeToRelocalize = timeToRelocalize
+        self.trackingStateAfterRelocalization = trackingStateAfterRelocalization
+        self.notes = notes
     }
 }
 
