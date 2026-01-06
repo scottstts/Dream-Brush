@@ -161,8 +161,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
             metalView.isOpaque = false
             metalView.backgroundColor = .clear
-            // We manage drawableSize manually to keep it in sync with renderScale.
-            metalView.autoResizeDrawable = false
+            metalView.autoResizeDrawable = true
 
             updateSplatURL(splatURL)
         }
@@ -279,8 +278,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             self.maxSplats = maxSplats
             guard let metalView else { return }
             metalView.preferredFramesPerSecond = preferredFramesPerSecond
-            metalView.autoResizeDrawable = false
-            updateDrawableSizeIfNeeded(for: metalView)
+            metalView.autoResizeDrawable = true
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -300,7 +298,6 @@ struct ViewerARViewContainer: UIViewRepresentable {
                 semaphore.signal()
             }
 
-            updateDrawableSizeIfNeeded(for: view)
             updateFrameStats()
 
             guard let renderPassDescriptor = view.currentRenderPassDescriptor,
@@ -364,42 +361,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             commandBuffer.commit()
         }
 
-        private func updateDrawableSizeIfNeeded(for view: MTKView) {
-            let rawScale = view.contentScaleFactor
-            let scaleFactor: CGFloat
-            if !rawScale.isFinite || rawScale <= 0 || rawScale > 10 {
-                scaleFactor = UIScreen.main.scale
-            } else {
-                scaleFactor = rawScale
-            }
-            var targetWidth = view.bounds.width
-            var targetHeight = view.bounds.height
-            let maxReasonableDimension: CGFloat = 10_000
-            if !targetWidth.isFinite ||
-                !targetHeight.isFinite ||
-                targetWidth <= 0 ||
-                targetHeight <= 0 ||
-                targetWidth > maxReasonableDimension ||
-                targetHeight > maxReasonableDimension {
-                if let windowBounds = view.window?.bounds, windowBounds.width > 0, windowBounds.height > 0 {
-                    targetWidth = windowBounds.width
-                    targetHeight = windowBounds.height
-                } else {
-                    let screenBounds = UIScreen.main.bounds
-                    targetWidth = screenBounds.width
-                    targetHeight = screenBounds.height
-                }
-            }
-
-            let desired = CGSize(
-                width: max(1, targetWidth * renderScale * scaleFactor),
-                height: max(1, targetHeight * renderScale * scaleFactor)
-            )
-            guard desired.width.isFinite, desired.height.isFinite else { return }
-            if view.drawableSize != desired {
-                view.drawableSize = desired
-            }
-        }
+        // Drawable size is managed by MTKView's auto-resize.
 
         private func resolveSplatURL(for url: URL) -> URL {
             guard let maxSplats else { return url }

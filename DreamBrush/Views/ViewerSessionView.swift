@@ -384,7 +384,7 @@ struct ViewerSessionView: View {
 
         var renderScale: CGFloat {
             switch self {
-            case .performance: return 0.7
+            case .performance: return 1.0
             case .balanced: return 1.0
             case .quality: return 1.0
             }
