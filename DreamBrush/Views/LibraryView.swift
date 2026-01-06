@@ -253,9 +253,20 @@ struct BundleDetailView: View {
     @State private var isTestingRelocalization = false
     @State private var testResult: RelocalizationTestResult?
     @State private var showingTestView = false
+    @State private var isPreparingExport = false
+    @State private var exportURL: URL?
+    @State private var showingExportPicker = false
+    @State private var showingShareSheet = false
+    @State private var showingExportError = false
+    @State private var exportErrorMessage = ""
 
     private var hasWorldMap: Bool {
         CaptureBundleManager.shared.hasWorldMap(at: bundle.bundleURL)
+    }
+
+    private enum ExportDestination {
+        case files
+        case share
     }
 
     var body: some View {
@@ -275,6 +286,35 @@ struct BundleDetailView: View {
                     LabeledContent("Keyframes", value: "\(bundle.manifest.captureStats.keyframeCount)")
                     LabeledContent("Depth Frames", value: "\(bundle.manifest.captureStats.depthFrameCount)")
                     LabeledContent("Storage Size", value: formatBytes(bundle.manifest.captureStats.estimatedSizeBytes))
+                }
+
+                // Export Section
+                Section {
+                    Button {
+                        prepareExport(for: .files)
+                    } label: {
+                        Label("Export Bundle to Files", systemImage: "folder")
+                    }
+                    .disabled(isPreparingExport)
+
+                    Button {
+                        prepareExport(for: .share)
+                    } label: {
+                        Label("Share Bundle (AirDrop)", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(isPreparingExport)
+
+                    if isPreparingExport {
+                        HStack(spacing: 12) {
+                            ProgressView()
+                            Text("Preparing export...")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Export")
+                } footer: {
+                    Text("Exports the full capture bundle folder for offline training.")
                 }
 
                 // Relocalization Quality Section
@@ -359,6 +399,25 @@ struct BundleDetailView: View {
                     onDismiss()
                 })
             }
+            .sheet(isPresented: $showingExportPicker) {
+                if let exportURL {
+                    DocumentExportPicker(urls: [exportURL]) { _ in
+                        cleanupExport()
+                    }
+                }
+            }
+            .sheet(isPresented: $showingShareSheet) {
+                if let exportURL {
+                    ActivityShareSheet(items: [exportURL]) { _ in
+                        cleanupExport()
+                    }
+                }
+            }
+            .alert("Export Failed", isPresented: $showingExportError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(exportErrorMessage)
+            }
         }
     }
 
@@ -370,6 +429,37 @@ struct BundleDetailView: View {
 
     private func formatBytes(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private func prepareExport(for destination: ExportDestination) {
+        guard !isPreparingExport else { return }
+        isPreparingExport = true
+
+        Task {
+            do {
+                let url = try await CaptureBundleManager.shared.createExportFolder(for: bundle)
+                await MainActor.run {
+                    exportURL = url
+                    isPreparingExport = false
+                    switch destination {
+                    case .files:
+                        showingExportPicker = true
+                    case .share:
+                        showingShareSheet = true
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isPreparingExport = false
+                    exportErrorMessage = error.localizedDescription
+                    showingExportError = true
+                }
+            }
+        }
+    }
+
+    private func cleanupExport() {
+        exportURL = nil
     }
 }
 

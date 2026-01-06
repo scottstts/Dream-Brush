@@ -276,6 +276,18 @@ final class CaptureBundleManager: @unchecked Sendable {
         logger.info("Deleted bundle \(bundle.manifest.bundleId)")
     }
 
+    func createExportFolder(for bundle: CaptureBundle) async throws -> URL {
+        let bundleURL = bundle.bundleURL
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: bundleURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw CaptureBundleError.bundleCreationFailed("Capture bundle folder is missing.")
+        }
+
+        logger.info("Using bundle folder for export at \(bundleURL.path)")
+        return bundleURL
+    }
+
     func loadThumbnail(for bundle: CaptureBundle) async -> UIImage? {
         let cacheKey = bundle.manifest.bundleId
         if let cached = thumbnailCache.object(forKey: cacheKey as NSString) {
