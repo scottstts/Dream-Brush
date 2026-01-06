@@ -24,6 +24,8 @@ struct ViewerSessionView: View {
     @State private var memoryUsageMB: Double?
     @State private var showPerformanceHUD = true
     @State private var qualityPreset: QualityPreset = .balanced
+    @State private var isUserInteracting = false
+    @State private var interactionTask: Task<Void, Never>?
 #if DEBUG
     @State private var renderMode: ViewerARViewContainer.RenderMode = .aligned
 #endif
@@ -38,7 +40,7 @@ struct ViewerSessionView: View {
                 renderMode: currentRenderMode,
                 preferredFramesPerSecond: qualityPreset.targetFPS,
                 renderScale: qualityPreset.renderScale,
-                maxSplats: qualityPreset.maxSplats
+                maxSplats: qualityPreset.maxSplats(total: asset.gaussianCount)
             ) { error in
                 renderLoadError = error
             } onStatsUpdate: { count in
@@ -66,8 +68,18 @@ struct ViewerSessionView: View {
                     .padding(.horizontal, 12)
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    noteUserInteraction()
+                }
+                .onEnded { _ in
+                    noteUserInteraction()
+                }
+        )
         .onDisappear {
             sessionManager.pauseSession()
+            interactionTask?.cancel()
         }
         .task {
             startSessionIfNeeded()
@@ -260,7 +272,7 @@ struct ViewerSessionView: View {
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.9))
 
-            if let maxSplats = qualityPreset.maxSplats {
+            if let maxSplats = qualityPreset.maxSplats(total: asset.gaussianCount) {
                 Text("Max splats: \(maxSplats)")
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.9))
@@ -303,6 +315,9 @@ struct ViewerSessionView: View {
     }
 
     private var effectiveShouldRender: Bool {
+        if isUserInteracting {
+            return false
+        }
 #if DEBUG
         if renderMode != .aligned {
             return true
@@ -349,6 +364,15 @@ struct ViewerSessionView: View {
         }
     }
 
+    private func noteUserInteraction() {
+        isUserInteracting = true
+        interactionTask?.cancel()
+        interactionTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            isUserInteracting = false
+        }
+    }
+
     private func currentMemoryUsageMB() -> Double? {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
@@ -362,13 +386,13 @@ struct ViewerSessionView: View {
     }
 
     enum QualityPreset: String, CaseIterable {
-        case performance
+        case fast
         case balanced
         case quality
 
         var title: String {
             switch self {
-            case .performance: return "Performance"
+            case .fast: return "Fast"
             case .balanced: return "Balanced"
             case .quality: return "Quality"
             }
@@ -376,25 +400,35 @@ struct ViewerSessionView: View {
 
         var targetFPS: Int {
             switch self {
-            case .performance: return 30
-            case .balanced: return 45
-            case .quality: return 60
+            case .fast: return 15
+            case .balanced: return 24
+            case .quality: return 30
             }
         }
 
         var renderScale: CGFloat {
             switch self {
-            case .performance: return 1.0
+            case .fast: return 1.0
             case .balanced: return 1.0
             case .quality: return 1.0
             }
         }
 
-        var maxSplats: Int? {
+        func maxSplats(total: Int?) -> Int? {
+            guard let total, total > 0 else {
+                switch self {
+                case .fast: return 5_000
+                case .balanced: return 10_000
+                case .quality: return nil
+                }
+            }
             switch self {
-            case .performance: return 20_000
-            case .balanced: return 60_000
-            case .quality: return nil
+            case .fast:
+                return min(20_000, max(5_000, total / 5))
+            case .balanced:
+                return min(60_000, max(10_000, total / 2))
+            case .quality:
+                return nil
             }
         }
     }

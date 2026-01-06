@@ -121,6 +121,9 @@ struct ViewerARViewContainer: UIViewRepresentable {
         private var onFrameStatsUpdate: ((FrameStats) -> Void)?
         private var lastFrameTimestamp: CFTimeInterval?
         private var lastStatsPublishTimestamp: CFTimeInterval?
+        private var lastRenderTimestamp: CFTimeInterval?
+        private var renderInterval: CFTimeInterval = 1.0 / 30.0
+        private var splatLoadToken = UUID()
 
         func configure(
             metalView: MTKView,
@@ -161,6 +164,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
             metalView.isOpaque = false
             metalView.backgroundColor = .clear
+            metalView.framebufferOnly = true
             metalView.autoResizeDrawable = true
 
             updateSplatURL(splatURL)
@@ -185,67 +189,75 @@ struct ViewerARViewContainer: UIViewRepresentable {
             let key = "\(splatURL.path)|\(maxSplats ?? -1)"
             guard currentSplatKey != key else { return }
             currentSplatKey = key
-
-            let resolvedURL = resolveSplatURL(for: splatURL)
+            let loadToken = UUID()
+            splatLoadToken = loadToken
+            let maxSplats = self.maxSplats
 
             guard let device else { return }
             if commandQueue == nil {
                 commandQueue = device.makeCommandQueue()
             }
 
-            do {
-                let renderer = try SplatRenderer(
-                    device: device,
-                    colorFormat: .bgra8Unorm_srgb,
-                    depthFormat: .depth32Float_stencil8,
-                    stencilFormat: .depth32Float_stencil8,
-                    sampleCount: 1,
-                    maxViewCount: 1,
-                    maxSimultaneousRenders: 3
-                )
-                try renderer.readPLY(from: resolvedURL)
-                splatRenderer = renderer
-                let count = renderer.splatCount
-                DispatchQueue.main.async {
-                    self.onStatsUpdate?(count)
-                }
-                if count == 0 {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let resolvedURL = self.resolveSplatURL(for: splatURL, maxSplats: maxSplats)
+
+                do {
+                    let renderer = try SplatRenderer(
+                        device: device,
+                        colorFormat: .bgra8Unorm_srgb,
+                        depthFormat: .depth32Float_stencil8,
+                        stencilFormat: .depth32Float_stencil8,
+                        sampleCount: 1,
+                        maxViewCount: 1,
+                        maxSimultaneousRenders: 3
+                    )
+                    try renderer.readPLY(from: resolvedURL)
+                    let count = renderer.splatCount
                     DispatchQueue.main.async {
-                        self.onError?("Loaded splat file but found 0 points")
+                        guard self.splatLoadToken == loadToken, self.currentSplatKey == key else { return }
+                        self.splatRenderer = renderer
+                        self.onStatsUpdate?(count)
+                        if count == 0 {
+                            self.onError?("Loaded splat file but found 0 points")
+                        }
                     }
-                }
-            } catch {
-                splatRenderer = nil
-                let message = error.localizedDescription
-                if message.localizedCaseInsensitiveContains("obj_info") {
-                    do {
-                        let sanitized = try SplatAssetManager.shared.sanitizeObjInfoLinesIfNeeded(at: splatURL)
-                        if sanitized {
-                            let retry = try SplatRenderer(
-                                device: device,
-                                colorFormat: .bgra8Unorm_srgb,
-                                depthFormat: .depth32Float_stencil8,
-                                stencilFormat: .depth32Float_stencil8,
-                                sampleCount: 1,
-                                maxViewCount: 1,
-                                maxSimultaneousRenders: 3
-                            )
-                            try retry.readPLY(from: splatURL)
-                            splatRenderer = retry
-                            let count = retry.splatCount
-                            DispatchQueue.main.async {
-                                self.onStatsUpdate?(count)
+                } catch {
+                    let message = error.localizedDescription
+                    if message.localizedCaseInsensitiveContains("obj_info") {
+                        do {
+                            let sanitized = try SplatAssetManager.shared.sanitizeObjInfoLinesIfNeeded(at: splatURL)
+                            if sanitized {
+                                let retry = try SplatRenderer(
+                                    device: device,
+                                    colorFormat: .bgra8Unorm_srgb,
+                                    depthFormat: .depth32Float_stencil8,
+                                    stencilFormat: .depth32Float_stencil8,
+                                    sampleCount: 1,
+                                    maxViewCount: 1,
+                                    maxSimultaneousRenders: 3
+                                )
+                                try retry.readPLY(from: splatURL)
+                                let count = retry.splatCount
+                                DispatchQueue.main.async {
+                                    guard self.splatLoadToken == loadToken, self.currentSplatKey == key else { return }
+                                    self.splatRenderer = retry
+                                    self.onStatsUpdate?(count)
+                                }
+                                return
                             }
-                            return
-                        }
-                    } catch {
-                        DispatchQueue.main.async {
-                            self.onError?("Failed to sanitize splat: \(error.localizedDescription)")
+                        } catch {
+                            DispatchQueue.main.async {
+                                guard self.splatLoadToken == loadToken, self.currentSplatKey == key else { return }
+                                self.onError?("Failed to sanitize splat: \(error.localizedDescription)")
+                            }
                         }
                     }
-                }
-                DispatchQueue.main.async {
-                    self.onError?("Failed to load splat: \(message)")
+                    DispatchQueue.main.async {
+                        guard self.splatLoadToken == loadToken, self.currentSplatKey == key else { return }
+                        self.splatRenderer = nil
+                        self.onError?("Failed to load splat: \(message)")
+                    }
                 }
             }
         }
@@ -277,8 +289,10 @@ struct ViewerARViewContainer: UIViewRepresentable {
             self.renderScale = max(0.25, min(sanitizedScale, 1.0))
             self.maxSplats = maxSplats
             guard let metalView else { return }
-            metalView.preferredFramesPerSecond = preferredFramesPerSecond
+            let clampedFPS = max(5, min(preferredFramesPerSecond, 60))
+            metalView.preferredFramesPerSecond = clampedFPS
             metalView.autoResizeDrawable = true
+            renderInterval = 1.0 / Double(clampedFPS)
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -286,7 +300,16 @@ struct ViewerARViewContainer: UIViewRepresentable {
         }
 
         func draw(in view: MTKView) {
-            _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
+            let now = CACurrentMediaTime()
+            if let lastRenderTimestamp, now - lastRenderTimestamp < renderInterval {
+                return
+            }
+            lastRenderTimestamp = now
+
+            // Never block the main thread on GPU work; drop the frame if we're behind.
+            guard inFlightSemaphore.wait(timeout: .now()) == .success else {
+                return
+            }
 
             guard let commandQueue, let commandBuffer = commandQueue.makeCommandBuffer() else {
                 inFlightSemaphore.signal()
@@ -363,7 +386,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
 
         // Drawable size is managed by MTKView's auto-resize.
 
-        private func resolveSplatURL(for url: URL) -> URL {
+        private func resolveSplatURL(for url: URL, maxSplats: Int?) -> URL {
             guard let maxSplats else { return url }
             guard let downsampled = try? downsampleIfNeeded(url: url, maxSplats: maxSplats) else {
                 return url
