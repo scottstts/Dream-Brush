@@ -7,6 +7,7 @@
 
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct DocumentExportPicker: UIViewControllerRepresentable {
     let urls: [URL]
@@ -40,6 +41,44 @@ struct DocumentExportPicker: UIViewControllerRepresentable {
 
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             onComplete(false)
+        }
+    }
+}
+
+struct DocumentImportPicker: UIViewControllerRepresentable {
+    let contentTypes: [UTType]
+    let allowsMultipleSelection: Bool
+    let onComplete: (Result<[URL], Error>) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let controller = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes)
+        controller.allowsMultipleSelection = allowsMultipleSelection
+        controller.delegate = context.coordinator
+        controller.shouldShowFileExtensions = true
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {
+        // No updates needed.
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onComplete: onComplete)
+    }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onComplete: (Result<[URL], Error>) -> Void
+
+        init(onComplete: @escaping (Result<[URL], Error>) -> Void) {
+            self.onComplete = onComplete
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onComplete(.success(urls))
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onComplete(.success([]))
         }
     }
 }

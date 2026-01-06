@@ -13,6 +13,9 @@ struct LibraryView: View {
     @State private var splatAssets: [SplatAsset] = []
     @State private var selectedBundle: CaptureBundle?
     @State private var selectedBundleIds = Set<CaptureBundle.ID>()
+    @State private var selectedSplatAsset: SplatAsset?
+    @State private var showingImportPicker = false
+    @State private var libraryErrorMessage: String?
     @Environment(\.editMode) private var editMode
 
     var body: some View {
@@ -51,7 +54,12 @@ struct LibraryView: View {
                     } else {
                         ForEach(splatAssets) { asset in
                             SplatAssetRow(asset: asset)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedSplatAsset = asset
+                                }
                         }
+                        .onDelete(perform: deleteSplatAssets)
                         .selectionDisabled(true)
                     }
                 }
@@ -79,13 +87,14 @@ struct LibraryView: View {
                     }
                 }
             }
-            .onAppear {
-                Task {
-                    await loadLibrary()
-                }
+            .task {
+                await loadLibrary()
             }
             .refreshable {
                 await loadLibrary()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .splatAssetsDidChange)) { _ in
+                Task { await loadLibrary() }
             }
             .onChange(of: editMode?.wrappedValue.isEditing ?? false) { _, isEditing in
                 if !isEditing {
@@ -100,6 +109,32 @@ struct LibraryView: View {
                     }
                 })
             }
+            .sheet(item: $selectedSplatAsset) { asset in
+                SplatAssetDetailView(
+                    asset: asset,
+                    bundles: capturedBundles,
+                    onUpdate: {
+                        Task { await loadLibrary() }
+                    }
+                )
+            }
+            .sheet(isPresented: $showingImportPicker) {
+                DocumentImportPicker(
+                    contentTypes: SplatAssetManager.supportedContentTypes,
+                    allowsMultipleSelection: true
+                ) { result in
+                    showingImportPicker = false
+                    handleImportResult(result)
+                }
+            }
+            .alert("Library Error", isPresented: Binding(
+                get: { libraryErrorMessage != nil },
+                set: { if !$0 { libraryErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(libraryErrorMessage ?? "Unknown error")
+            }
         }
     }
 
@@ -108,11 +143,46 @@ struct LibraryView: View {
         await MainActor.run {
             capturedBundles = bundles
         }
-        // TODO: Load splat assets
+        let assets = await SplatAssetManager.shared.listAssetsAsync()
+        await MainActor.run {
+            splatAssets = assets
+        }
     }
 
     private func importSplatAsset() {
-        // TODO: Implement splat asset import via document picker
+        showingImportPicker = true
+    }
+
+    private func handleImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard !urls.isEmpty else { return }
+            Task {
+                await importAssets(urls)
+            }
+        case .failure(let error):
+            libraryErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func importAssets(_ urls: [URL]) async {
+        var imported: [SplatAsset] = []
+        var errors: [String] = []
+
+        for url in urls {
+            do {
+                let asset = try SplatAssetManager.shared.importAsset(from: url)
+                imported.append(asset)
+            } catch {
+                errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
+            }
+            await Task.yield()
+        }
+
+        splatAssets = (splatAssets + imported).sorted { $0.importedAt > $1.importedAt }
+        if !errors.isEmpty {
+            libraryErrorMessage = errors.joined(separator: "\n")
+        }
     }
 
     private func deleteBundles(at offsets: IndexSet) {
@@ -134,6 +204,18 @@ struct LibraryView: View {
         }
         capturedBundles.removeAll { selectedBundleIds.contains($0.id) }
         selectedBundleIds.removeAll()
+    }
+
+    private func deleteSplatAssets(at offsets: IndexSet) {
+        for index in offsets {
+            let asset = splatAssets[index]
+            do {
+                try SplatAssetManager.shared.deleteAsset(asset)
+            } catch {
+                libraryErrorMessage = "Failed to delete \(asset.name): \(error.localizedDescription)"
+            }
+        }
+        splatAssets.remove(atOffsets: offsets)
     }
 }
 
@@ -232,6 +314,26 @@ struct SplatAssetRow: View {
                 Text(asset.formattedFileSize)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if let gaussianCount = asset.formattedGaussianCount {
+                    Text("Gaussians: \(gaussianCount)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Gaussians: n/a")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let bundleId = asset.associatedBundleId {
+                    Text("Linked: \(bundleId.prefix(8))...")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Not linked")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             Spacer()
@@ -240,6 +342,161 @@ struct SplatAssetRow: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+struct SplatAssetDetailView: View {
+    let asset: SplatAsset
+    let bundles: [CaptureBundle]
+    let onUpdate: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentAsset: SplatAsset
+    @State private var selectedBundleId: String?
+    @State private var loadTestState: LoadTestState = .idle
+    @State private var updateErrorMessage: String?
+
+    init(asset: SplatAsset, bundles: [CaptureBundle], onUpdate: @escaping () -> Void) {
+        self.asset = asset
+        self.bundles = bundles
+        self.onUpdate = onUpdate
+        _currentAsset = State(initialValue: asset)
+        _selectedBundleId = State(initialValue: asset.associatedBundleId)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Asset Info") {
+                    LabeledContent("Name", value: currentAsset.name)
+                    LabeledContent("Format", value: currentAsset.fileExtension.uppercased())
+                    LabeledContent("File Size", value: currentAsset.formattedFileSize)
+                    LabeledContent("Imported", value: currentAsset.importedAt.formatted(date: .abbreviated, time: .shortened))
+                    if let gaussianCount = currentAsset.formattedGaussianCount {
+                        LabeledContent("Gaussians", value: gaussianCount)
+                    } else {
+                        LabeledContent("Gaussians", value: "n/a")
+                    }
+                }
+
+                Section("Linked Capture Bundle") {
+                    if bundles.isEmpty {
+                        Text("No captures available yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Linked Bundle", selection: $selectedBundleId) {
+                            Text("Not linked").tag(String?.none)
+                            ForEach(bundles) { bundle in
+                                Text(bundle.manifest.bundleId.prefix(8) + "...")
+                                    .tag(Optional(bundle.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+
+                Section("Load Test") {
+                    Button {
+                        runLoadTest()
+                    } label: {
+                        Label("Run Load Test", systemImage: "checkmark.seal")
+                    }
+
+                    loadTestStatusView
+                }
+            }
+            .navigationTitle("Splat Asset")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onChange(of: selectedBundleId, initial: false) { _, newValue in
+                updateAssociation(to: newValue)
+            }
+            .alert("Update Failed", isPresented: Binding(
+                get: { updateErrorMessage != nil },
+                set: { if !$0 { updateErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(updateErrorMessage ?? "Unknown error")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var loadTestStatusView: some View {
+        switch loadTestState {
+        case .idle:
+            Text("Validate that the PLY header parses correctly.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .running:
+            HStack {
+                ProgressView()
+                Text("Testing...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .success(let message):
+            Label(message, systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .failure(let message):
+            Label(message, systemImage: "xmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+    }
+
+    private func updateAssociation(to bundleId: String?) {
+        let updated = currentAsset.updatingAssociation(bundleId)
+
+        Task {
+            do {
+                try SplatAssetManager.shared.updateAsset(updated)
+                await MainActor.run {
+                    currentAsset = updated
+                    onUpdate()
+                }
+            } catch {
+                await MainActor.run {
+                    updateErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func runLoadTest() {
+        loadTestState = .running
+
+        Task {
+            let result = SplatAssetManager.shared.validateAsset(currentAsset)
+
+            if result.success {
+                loadTestState = .success(result.details)
+                if result.gaussianCount != nil, result.gaussianCount != currentAsset.gaussianCount {
+                    let updated = currentAsset.updatingGaussianCount(result.gaussianCount)
+                    do {
+                        try SplatAssetManager.shared.updateAsset(updated)
+                        currentAsset = updated
+                        onUpdate()
+                    } catch {
+                        updateErrorMessage = error.localizedDescription
+                    }
+                }
+            } else {
+                loadTestState = .failure(result.details)
+            }
+        }
+    }
+
+    private enum LoadTestState {
+        case idle
+        case running
+        case success(String)
+        case failure(String)
     }
 }
 
