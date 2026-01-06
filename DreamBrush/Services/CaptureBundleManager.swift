@@ -64,7 +64,7 @@ final class CaptureBundleManager: @unchecked Sendable {
             try fileManager.createDirectory(at: subURL, withIntermediateDirectories: true)
         }
 
-        var manifest = CaptureManifest(bundleId: bundleId, captureSettings: settings)
+        let manifest = CaptureManifest(bundleId: bundleId, captureSettings: settings)
         try writeManifest(manifest, to: bundleURL)
 
         let anchors = AnchorData(rootAnchor: AnchorInfo())

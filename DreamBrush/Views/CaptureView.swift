@@ -8,10 +8,8 @@
 import SwiftUI
 
 struct CaptureView: View {
-    @State private var lastCreatedBundle: CaptureBundle?
-    @State private var validationResult: ValidationResult?
-    @State private var showingAlert = false
-    @State private var alertMessage = ""
+    @State private var showingCaptureSession = false
+    @State private var recentBundles: [CaptureBundle] = []
 
     var body: some View {
         NavigationStack {
@@ -32,88 +30,83 @@ struct CaptureView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
 
-                if let bundle = lastCreatedBundle {
-                    VStack(spacing: 8) {
-                        Text("Last Bundle Created")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Text(bundle.manifest.bundleId.prefix(8) + "...")
-                            .font(.system(.body, design: .monospaced))
-
-                        if let result = validationResult {
-                            Label(
-                                result.isValid ? "Valid" : "Invalid",
-                                systemImage: result.isValid ? "checkmark.circle.fill" : "xmark.circle.fill"
-                            )
-                            .foregroundStyle(result.isValid ? .green : .red)
-                            .font(.caption)
-                        }
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
+                // Recent captures summary
+                if !recentBundles.isEmpty {
+                    recentCapturesView
                 }
 
                 Spacer()
 
-                VStack(spacing: 12) {
-                    Button(action: testBundleCreation) {
-                        Label("Test Bundle Creation", systemImage: "folder.badge.plus")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.orange)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                    }
-
-                    Button(action: {
-                        // TODO: Start capture session
-                    }) {
-                        Label("Start Capture", systemImage: "record.circle")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.accentColor)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                    }
+                // Start Capture button
+                Button(action: { showingCaptureSession = true }) {
+                    Label("Start Capture", systemImage: "record.circle")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
                 }
                 .padding(.horizontal, 40)
                 .padding(.bottom, 40)
             }
             .navigationTitle("Capture")
-            .alert("Bundle Test", isPresented: $showingAlert) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(alertMessage)
+            .fullScreenCover(isPresented: $showingCaptureSession) {
+                NavigationStack {
+                    CaptureSessionView()
+                }
+            }
+            .onAppear {
+                loadRecentBundles()
+            }
+            .onChange(of: showingCaptureSession) { _, isShowing in
+                if !isShowing {
+                    // Refresh bundles when returning from capture
+                    loadRecentBundles()
+                }
             }
         }
     }
 
-    private func testBundleCreation() {
-        do {
-            let bundle = try CaptureBundleManager.shared.createBundle()
+    private var recentCapturesView: some View {
+        VStack(spacing: 8) {
+            Text("Recent Captures")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            let loadedBundle = try CaptureBundleManager.shared.loadBundle(at: bundle.bundleURL)
+            HStack(spacing: 12) {
+                ForEach(recentBundles.prefix(3)) { bundle in
+                    VStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.secondary.opacity(0.2))
+                            .frame(width: 60, height: 60)
+                            .overlay {
+                                if let thumb = bundle.thumbnail {
+                                    Image(uiImage: thumb)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 60, height: 60)
+                                        .cornerRadius(8)
+                                } else {
+                                    Image(systemName: "photo.stack")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
 
-            let result = CaptureBundleManager.shared.validateBundle(loadedBundle)
-
-            lastCreatedBundle = loadedBundle
-            validationResult = result
-
-            if result.isValid {
-                alertMessage = "Bundle created and validated successfully!\n\nBundle ID: \(bundle.manifest.bundleId.prefix(8))...\nDevice: \(bundle.manifest.deviceModel)"
-            } else {
-                alertMessage = "Bundle created but validation failed:\n\(result.issues.joined(separator: "\n"))"
+                        Text("\(bundle.manifest.captureStats.frameCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
-            showingAlert = true
-
-        } catch {
-            alertMessage = "Failed to create bundle: \(error.localizedDescription)"
-            showingAlert = true
         }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+
+    private func loadRecentBundles() {
+        recentBundles = CaptureBundleManager.shared.listBundles()
     }
 }
 
