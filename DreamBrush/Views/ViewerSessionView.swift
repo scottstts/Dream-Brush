@@ -26,6 +26,9 @@ struct ViewerSessionView: View {
     @State private var qualityPreset: QualityPreset = .balanced
     @State private var isUserInteracting = false
     @State private var interactionTask: Task<Void, Never>?
+    @State private var autoSelectionCompleted = false
+    @State private var manualPresetOverride = false
+    @State private var autoSelecting = false
 #if DEBUG
     @State private var renderMode: ViewerARViewContainer.RenderMode = .aligned
 #endif
@@ -40,7 +43,8 @@ struct ViewerSessionView: View {
                 renderMode: currentRenderMode,
                 preferredFramesPerSecond: qualityPreset.targetFPS,
                 renderScale: qualityPreset.renderScale,
-                maxSplats: qualityPreset.maxSplats(total: asset.gaussianCount)
+                maxSplats: qualityPreset.maxSplats(total: asset.gaussianCount),
+                renderStride: qualityPreset.renderStride
             ) { error in
                 renderLoadError = error
             } onStatsUpdate: { count in
@@ -68,6 +72,11 @@ struct ViewerSessionView: View {
                     .padding(.horizontal, 12)
             }
         }
+        .onChange(of: qualityPreset) { _, _ in
+            if !autoSelecting {
+                manualPresetOverride = true
+            }
+        }
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in
@@ -86,6 +95,9 @@ struct ViewerSessionView: View {
         }
         .task {
             await updateMemoryLoop()
+        }
+        .task {
+            await autoSelectQualityIfNeeded()
         }
         .alert("Viewer Error", isPresented: $showingError) {
             Button("OK", role: .cancel) {}
@@ -373,6 +385,37 @@ struct ViewerSessionView: View {
         }
     }
 
+    private func autoSelectQualityIfNeeded() async {
+        guard !autoSelectionCompleted, !manualPresetOverride else { return }
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            if manualPresetOverride { return }
+            if let fps = frameStats?.fps {
+                let selected: QualityPreset
+                if fps < 6 {
+                    selected = .fast
+                } else if fps < 14 {
+                    selected = .balanced
+                } else {
+                    selected = .quality
+                }
+
+                if selected != qualityPreset {
+                    await MainActor.run {
+                        autoSelecting = true
+                        qualityPreset = selected
+                        autoSelecting = false
+                    }
+                }
+
+                autoSelectionCompleted = true
+                return
+            }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        autoSelectionCompleted = true
+    }
+
     private func currentMemoryUsageMB() -> Double? {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
@@ -411,6 +454,14 @@ struct ViewerSessionView: View {
             case .fast: return 1.0
             case .balanced: return 1.0
             case .quality: return 1.0
+            }
+        }
+
+        var renderStride: Int {
+            switch self {
+            case .fast: return 3
+            case .balanced: return 2
+            case .quality: return 1
             }
         }
 

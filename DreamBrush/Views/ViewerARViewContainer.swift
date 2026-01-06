@@ -37,6 +37,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
     let preferredFramesPerSecond: Int
     let renderScale: CGFloat
     let maxSplats: Int?
+    let renderStride: Int
     let onLoadError: (String) -> Void
     let onStatsUpdate: (Int) -> Void
     let onFrameStatsUpdate: (FrameStats) -> Void
@@ -64,7 +65,8 @@ struct ViewerARViewContainer: UIViewRepresentable {
         context.coordinator.updatePerformance(
             preferredFramesPerSecond: preferredFramesPerSecond,
             renderScale: renderScale,
-            maxSplats: maxSplats
+            maxSplats: maxSplats,
+            renderStride: renderStride
         )
         context.coordinator.updateSplatURL(splatURL)
         context.coordinator.updateRenderState(
@@ -96,7 +98,8 @@ struct ViewerARViewContainer: UIViewRepresentable {
         context.coordinator.updatePerformance(
             preferredFramesPerSecond: preferredFramesPerSecond,
             renderScale: renderScale,
-            maxSplats: maxSplats
+            maxSplats: maxSplats,
+            renderStride: renderStride
         )
         context.coordinator.updateSplatURL(splatURL)
     }
@@ -116,6 +119,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
         private var preferredFramesPerSecond = 60
         private var renderScale: CGFloat = 1
         private var maxSplats: Int?
+        private var renderStride: Int = 1
         private var onError: ((String) -> Void)?
         private var onStatsUpdate: ((Int) -> Void)?
         private var onFrameStatsUpdate: ((FrameStats) -> Void)?
@@ -124,6 +128,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
         private var lastRenderTimestamp: CFTimeInterval?
         private var renderInterval: CFTimeInterval = 1.0 / 30.0
         private var splatLoadToken = UUID()
+        private var renderFrameIndex: UInt = 0
 
         func configure(
             metalView: MTKView,
@@ -278,7 +283,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             self.onFrameStatsUpdate = onFrameStatsUpdate
         }
 
-        func updatePerformance(preferredFramesPerSecond: Int, renderScale: CGFloat, maxSplats: Int?) {
+        func updatePerformance(preferredFramesPerSecond: Int, renderScale: CGFloat, maxSplats: Int?, renderStride: Int) {
             self.preferredFramesPerSecond = preferredFramesPerSecond
             let sanitizedScale: CGFloat
             if !renderScale.isFinite {
@@ -288,6 +293,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             }
             self.renderScale = max(0.25, min(sanitizedScale, 1.0))
             self.maxSplats = maxSplats
+            self.renderStride = max(1, renderStride)
             guard let metalView else { return }
             let clampedFPS = max(5, min(preferredFramesPerSecond, 60))
             metalView.preferredFramesPerSecond = clampedFPS
@@ -305,6 +311,11 @@ struct ViewerARViewContainer: UIViewRepresentable {
                 return
             }
             lastRenderTimestamp = now
+
+            renderFrameIndex &+= 1
+            if renderStride > 1, renderFrameIndex % UInt(renderStride) != 0 {
+                return
+            }
 
             // Never block the main thread on GPU work; drop the frame if we're behind.
             guard inFlightSemaphore.wait(timeout: .now()) == .success else {
