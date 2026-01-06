@@ -1,0 +1,28 @@
+ply
+format ascii 1.0
+comment DreamBrush test 3DGS splat
+comment Minimal splat PLY for MetalSplatter
+comment Properties: x y z nx ny nz f_dc_0 f_dc_1 f_dc_2 opacity scale_0 scale_1 scale_2 rot_0 rot_1 rot_2 rot_3
+element vertex 4
+property float x
+property float y
+property float z
+property float nx
+property float ny
+property float nz
+property float f_dc_0
+property float f_dc_1
+property float f_dc_2
+property float opacity
+property float scale_0
+property float scale_1
+property float scale_2
+property float rot_0
+property float rot_1
+property float rot_2
+property float rot_3
+end_header
+-0.10 -0.10 0.00 0.0 0.0 1.0 0.8 0.2 -0.2 4.0 -1.0 -1.0 -1.0 1.0 0.0 0.0 0.0
+ 0.10 -0.10 0.00 0.0 0.0 1.0 0.2 0.8 -0.2 4.0 -1.0 -1.0 -1.0 1.0 0.0 0.0 0.0
+-0.10  0.10 0.00 0.0 0.0 1.0 0.2 -0.2 0.8 4.0 -1.0 -1.0 -1.0 1.0 0.0 0.0 0.0
+ 0.10  0.10 0.00 0.0 0.0 1.0 0.6 0.6 0.0 4.0 -1.0 -1.0 -1.0 1.0 0.0 0.0 0.0

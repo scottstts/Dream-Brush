@@ -6,6 +6,8 @@
 //
 
 import Foundation
+import Metal
+import MetalSplatter
 import UniformTypeIdentifiers
 import os.log
 
@@ -21,6 +23,7 @@ enum SplatAssetValidationError: LocalizedError {
     case unreadableHeader
     case invalidHeader
     case missingEndHeader
+    case renderValidationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +35,8 @@ enum SplatAssetValidationError: LocalizedError {
             return "PLY header is invalid."
         case .missingEndHeader:
             return "PLY header did not include end_header."
+        case .renderValidationFailed(let reason):
+            return "MetalSplatter validation failed: \(reason)"
         }
     }
 }
@@ -237,7 +242,8 @@ final class SplatAssetManager: @unchecked Sendable {
         let destinationURL = assetFolder.appendingPathComponent(sourceURL.lastPathComponent)
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
 
-        let headerInfo = try SplatAssetValidator.parsePlyHeader(from: destinationURL)
+        _ = try sanitizeObjInfoLinesIfNeeded(at: destinationURL)
+        let gaussianCount = try validateWithMetalSplatter(at: destinationURL)
         let fileSize = try fileSizeForItem(at: destinationURL)
         let displayName = sourceURL.deletingPathExtension().lastPathComponent
 
@@ -247,7 +253,7 @@ final class SplatAssetManager: @unchecked Sendable {
             fileURL: destinationURL,
             fileSize: fileSize,
             importedAt: Date(),
-            gaussianCount: headerInfo.vertexCount,
+            gaussianCount: gaussianCount,
             associatedBundleId: associatedBundleId
         )
 
@@ -290,14 +296,14 @@ final class SplatAssetManager: @unchecked Sendable {
         }
 
         do {
-            let headerInfo = try SplatAssetValidator.parsePlyHeader(from: url)
-            let format = headerInfo.format ?? "unknown"
-            let details = "PLY header OK (format: \(format))."
+            _ = try sanitizeObjInfoLinesIfNeeded(at: url)
+            let gaussianCount = try validateWithMetalSplatter(at: url)
+            let details = "MetalSplatter validation OK."
             return SplatAssetValidationResult(
                 success: true,
                 details: details,
-                gaussianCount: headerInfo.vertexCount,
-                format: format
+                gaussianCount: gaussianCount,
+                format: "metalSplatter"
             )
         } catch {
             return SplatAssetValidationResult(
@@ -330,5 +336,132 @@ final class SplatAssetManager: @unchecked Sendable {
             return size.int64Value
         }
         return Int64((try Data(contentsOf: url)).count)
+    }
+
+    private func validateWithMetalSplatter(at url: URL) throws -> Int {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw SplatAssetValidationError.renderValidationFailed("Metal device unavailable")
+        }
+
+        let renderer = try SplatRenderer(
+            device: device,
+            colorFormat: .bgra8Unorm_srgb,
+            depthFormat: .depth32Float_stencil8,
+            stencilFormat: .depth32Float_stencil8,
+            sampleCount: 1,
+            maxViewCount: 1,
+            maxSimultaneousRenders: 1
+        )
+        try renderer.readPLY(from: url)
+        return renderer.splatCount
+    }
+
+    /// Removes unsupported `obj_info` lines from PLY headers (MetalSplatter parser is strict).
+    @discardableResult
+    func sanitizeObjInfoLinesIfNeeded(at url: URL) throws -> Bool {
+        let headerScan = try scanPlyHeader(from: url)
+
+        guard let text = String(data: headerScan.headerData, encoding: .ascii)
+            ?? String(data: headerScan.headerData, encoding: .utf8) else {
+            return false
+        }
+
+        let lines = text.components(separatedBy: .newlines)
+        var sanitizedLines: [String] = []
+        var removed = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            if trimmed.hasPrefix("obj_info") {
+                removed = true
+                continue
+            }
+            sanitizedLines.append(trimmed)
+        }
+
+        guard removed else { return false }
+
+        let sanitizedHeader = sanitizedLines.joined(separator: "\n") + "\n"
+        let sanitizedHeaderData = Data(sanitizedHeader.utf8)
+
+        let tempURL = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".sanitized")
+
+        if fileManager.fileExists(atPath: tempURL.path) {
+            try fileManager.removeItem(at: tempURL)
+        }
+
+        fileManager.createFile(atPath: tempURL.path, contents: nil)
+        let output = try FileHandle(forWritingTo: tempURL)
+        defer { try? output.close() }
+
+        try output.write(contentsOf: sanitizedHeaderData)
+        if !headerScan.remainder.isEmpty {
+            try output.write(contentsOf: headerScan.remainder)
+        }
+
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        try input.seek(toOffset: UInt64(headerScan.bytesConsumed))
+
+        while true {
+            if let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                try output.write(contentsOf: chunk)
+            } else {
+                break
+            }
+        }
+
+        _ = try fileManager.replaceItemAt(url, withItemAt: tempURL)
+        logger.info("Sanitized obj_info lines from PLY header at \(url.lastPathComponent, privacy: .public)")
+        return true
+    }
+
+    private struct HeaderScanResult {
+        let headerData: Data
+        let bytesConsumed: Int
+        let remainder: Data
+    }
+
+    private func scanPlyHeader(from url: URL) throws -> HeaderScanResult {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        let maxHeaderSize = 256 * 1024
+        let headerTerminatorData = Data("end_header".utf8)
+        var buffer = Data()
+
+        while buffer.count < maxHeaderSize {
+            if let chunk = try handle.read(upToCount: 4096), !chunk.isEmpty {
+                buffer.append(chunk)
+                if buffer.range(of: headerTerminatorData) != nil {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+
+        guard let range = buffer.range(of: headerTerminatorData) else {
+            throw SplatAssetValidationError.missingEndHeader
+        }
+
+        var endIndex = range.upperBound
+        if endIndex < buffer.endIndex {
+            while endIndex < buffer.endIndex {
+                let byte = buffer[endIndex]
+                endIndex = buffer.index(after: endIndex)
+                if byte == 0x0A { break }
+            }
+        }
+
+        let headerData = buffer.subdata(in: buffer.startIndex..<endIndex)
+        let remainder = buffer.subdata(in: endIndex..<buffer.endIndex)
+
+        return HeaderScanResult(
+            headerData: headerData,
+            bytesConsumed: endIndex,
+            remainder: remainder
+        )
     }
 }
