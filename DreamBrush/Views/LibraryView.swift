@@ -812,7 +812,11 @@ struct RelocalizationTestView: View {
     var body: some View {
         ZStack {
             // AR Camera Preview
-            ARViewContainer(session: sessionManager.session ?? ARSession())
+            ARViewContainer(
+                session: sessionManager.session ?? ARSession(),
+                showCoverageOverlay: false,
+                isRecording: false
+            )
                 .ignoresSafeArea()
 
             // Overlay

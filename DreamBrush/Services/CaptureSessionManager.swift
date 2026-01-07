@@ -197,6 +197,12 @@ final class CaptureSessionManager: NSObject {
         startSession()
     }
 
+    func updateCoverageOverlayEnabled(_ enabled: Bool) {
+        config.enableMeshReconstruction = enabled
+        guard isSessionRunning, !isRecording else { return }
+        startSession()
+    }
+
     private func selectVideoFormat(from formats: [ARConfiguration.VideoFormat], targetLongEdge: Int?) -> ARConfiguration.VideoFormat? {
         guard !formats.isEmpty else { return nil }
 

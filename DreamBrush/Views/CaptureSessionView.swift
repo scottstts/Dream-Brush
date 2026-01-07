@@ -16,11 +16,16 @@ struct CaptureSessionView: View {
     @State private var showingError = false
     @State private var errorMessage = ""
     @State private var captureCompleted = false
+    @State private var coverageOverlayEnabled = true
 
     var body: some View {
         ZStack {
             // AR Camera Preview
-            ARViewContainer(session: sessionManager.session ?? ARSession())
+            ARViewContainer(
+                session: sessionManager.session ?? ARSession(),
+                showCoverageOverlay: coverageOverlayEnabled,
+                isRecording: sessionManager.isRecording
+            )
                 .ignoresSafeArea()
 
             // Overlay UI
@@ -243,6 +248,9 @@ struct CaptureSessionView: View {
             Text(resolutionBinding.wrappedValue.subtitle)
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.7))
+
+            Toggle("Coverage Overlay", isOn: coverageOverlayBinding)
+                .font(.caption)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -303,6 +311,7 @@ struct CaptureSessionView: View {
 
     private func setupSession() {
         _ = sessionManager.createSession()
+        sessionManager.updateCoverageOverlayEnabled(coverageOverlayEnabled)
         sessionManager.startSession()
     }
 
@@ -343,6 +352,16 @@ struct CaptureSessionView: View {
             get: { self.sessionManager.config.captureResolution },
             set: { newValue in
                 self.sessionManager.updateCaptureResolution(newValue)
+            }
+        )
+    }
+
+    private var coverageOverlayBinding: Binding<Bool> {
+        Binding(
+            get: { self.coverageOverlayEnabled },
+            set: { newValue in
+                self.coverageOverlayEnabled = newValue
+                self.sessionManager.updateCoverageOverlayEnabled(newValue)
             }
         )
     }
