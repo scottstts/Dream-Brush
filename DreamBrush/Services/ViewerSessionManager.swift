@@ -59,7 +59,8 @@ final class ViewerSessionManager: NSObject {
 
         loadedBundle = bundle
         expectedAnchorName = anchors.rootAnchor.name
-        captureAnchorTransform = Self.matrix(from: anchors.rootAnchor.transform)
+        let matrixLayout = bundle.manifest.coordinateConventions.matrixLayout
+        captureAnchorTransform = Self.matrix(from: anchors.rootAnchor.transform, layout: matrixLayout)
         modelToCaptureTransform = modelToCapture ?? matrix_identity_float4x4
 
         resetState()
@@ -275,9 +276,19 @@ private extension ViewerSessionManager {
             relocalizationMessage = "Searching for anchor..."
         }
     }
+}
 
-    static func matrix(from array: [[Float]]) -> simd_float4x4? {
+extension ViewerSessionManager {
+    static func matrix(from array: [[Float]], layout: String?) -> simd_float4x4? {
         guard array.count == 4, array.allSatisfy({ $0.count == 4 }) else { return nil }
+        let normalized = layout?.lowercased()
+        if normalized == "row_major" {
+            let c0 = SIMD4<Float>(array[0][0], array[1][0], array[2][0], array[3][0])
+            let c1 = SIMD4<Float>(array[0][1], array[1][1], array[2][1], array[3][1])
+            let c2 = SIMD4<Float>(array[0][2], array[1][2], array[2][2], array[3][2])
+            let c3 = SIMD4<Float>(array[0][3], array[1][3], array[2][3], array[3][3])
+            return simd_float4x4(columns: (c0, c1, c2, c3))
+        }
         let c0 = SIMD4<Float>(array[0][0], array[0][1], array[0][2], array[0][3])
         let c1 = SIMD4<Float>(array[1][0], array[1][1], array[1][2], array[1][3])
         let c2 = SIMD4<Float>(array[2][0], array[2][1], array[2][2], array[2][3])

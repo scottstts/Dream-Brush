@@ -16,6 +16,7 @@ struct SplatAsset: Identifiable, Codable, Sendable {
     let gaussianCount: Int?
     let associatedBundleId: String?
     let modelToCaptureTransform: [[Float]]?
+    let modelToCaptureLayout: String?
 
     var formattedFileSize: String {
         ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
@@ -40,7 +41,8 @@ struct SplatAsset: Identifiable, Codable, Sendable {
         importedAt: Date = Date(),
         gaussianCount: Int? = nil,
         associatedBundleId: String? = nil,
-        modelToCaptureTransform: [[Float]]? = nil
+        modelToCaptureTransform: [[Float]]? = nil,
+        modelToCaptureLayout: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -50,6 +52,7 @@ struct SplatAsset: Identifiable, Codable, Sendable {
         self.gaussianCount = gaussianCount
         self.associatedBundleId = associatedBundleId
         self.modelToCaptureTransform = modelToCaptureTransform
+        self.modelToCaptureLayout = modelToCaptureLayout
     }
 }
 
@@ -63,7 +66,8 @@ extension SplatAsset {
             importedAt: importedAt,
             gaussianCount: gaussianCount,
             associatedBundleId: bundleId,
-            modelToCaptureTransform: modelToCaptureTransform
+            modelToCaptureTransform: modelToCaptureTransform,
+            modelToCaptureLayout: modelToCaptureLayout
         )
     }
 
@@ -76,7 +80,8 @@ extension SplatAsset {
             importedAt: importedAt,
             gaussianCount: gaussianCount,
             associatedBundleId: associatedBundleId,
-            modelToCaptureTransform: modelToCaptureTransform
+            modelToCaptureTransform: modelToCaptureTransform,
+            modelToCaptureLayout: modelToCaptureLayout
         )
     }
 }

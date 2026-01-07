@@ -249,7 +249,7 @@ struct CoordinateConventions: Codable {
 
     init() {
         self.handedness = "right"
-        self.matrixLayout = "column_major"
+        self.matrixLayout = "row_major"
         self.transformDirection = "camera_to_world"
         self.intrinsicsLayout = "row_major"
         self.upAxis = "Y"

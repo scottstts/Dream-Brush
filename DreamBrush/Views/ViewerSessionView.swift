@@ -361,12 +361,7 @@ struct ViewerSessionView: View {
 
     private func modelToCaptureTransform() -> simd_float4x4? {
         guard let transform = asset.modelToCaptureTransform else { return nil }
-        guard transform.count == 4, transform.allSatisfy({ $0.count == 4 }) else { return nil }
-        let c0 = SIMD4<Float>(transform[0][0], transform[0][1], transform[0][2], transform[0][3])
-        let c1 = SIMD4<Float>(transform[1][0], transform[1][1], transform[1][2], transform[1][3])
-        let c2 = SIMD4<Float>(transform[2][0], transform[2][1], transform[2][2], transform[2][3])
-        let c3 = SIMD4<Float>(transform[3][0], transform[3][1], transform[3][2], transform[3][3])
-        return simd_float4x4(columns: (c0, c1, c2, c3))
+        return ViewerSessionManager.matrix(from: transform, layout: asset.modelToCaptureLayout ?? "row_major")
     }
 
     private func updateMemoryLoop() async {

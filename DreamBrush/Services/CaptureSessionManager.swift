@@ -394,14 +394,19 @@ final class CaptureSessionManager: NSObject {
         return AnchorData(rootAnchor: rootAnchorInfo)
     }
 
+    /// Converts simd_float4x4 to a row-major 4x4 array for JSON serialization.
+    private func matrixToRowMajorArray(_ matrix: simd_float4x4) -> [[Float]] {
+        [
+            [matrix.columns.0.x, matrix.columns.1.x, matrix.columns.2.x, matrix.columns.3.x],
+            [matrix.columns.0.y, matrix.columns.1.y, matrix.columns.2.y, matrix.columns.3.y],
+            [matrix.columns.0.z, matrix.columns.1.z, matrix.columns.2.z, matrix.columns.3.z],
+            [matrix.columns.0.w, matrix.columns.1.w, matrix.columns.2.w, matrix.columns.3.w]
+        ]
+    }
+
     /// Converts simd_float4x4 to nested Float array for JSON serialization
     private func simdToArray(_ matrix: simd_float4x4) -> [[Float]] {
-        [
-            [matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z, matrix.columns.0.w],
-            [matrix.columns.1.x, matrix.columns.1.y, matrix.columns.1.z, matrix.columns.1.w],
-            [matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z, matrix.columns.2.w],
-            [matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z, matrix.columns.3.w]
-        ]
+        matrixToRowMajorArray(matrix)
     }
 
     // MARK: - Relocalization Testing
@@ -748,20 +753,10 @@ final class CaptureSessionManager: NSObject {
         ]
 
         let transform = camera.transform
-        let transformArray: [[Float]] = [
-            [transform.columns.0.x, transform.columns.0.y, transform.columns.0.z, transform.columns.0.w],
-            [transform.columns.1.x, transform.columns.1.y, transform.columns.1.z, transform.columns.1.w],
-            [transform.columns.2.x, transform.columns.2.y, transform.columns.2.z, transform.columns.2.w],
-            [transform.columns.3.x, transform.columns.3.y, transform.columns.3.z, transform.columns.3.w]
-        ]
+        let transformArray = matrixToRowMajorArray(transform)
 
         let projection = camera.projectionMatrix
-        let projectionArray: [[Float]] = [
-            [projection.columns.0.x, projection.columns.0.y, projection.columns.0.z, projection.columns.0.w],
-            [projection.columns.1.x, projection.columns.1.y, projection.columns.1.z, projection.columns.1.w],
-            [projection.columns.2.x, projection.columns.2.y, projection.columns.2.z, projection.columns.2.w],
-            [projection.columns.3.x, projection.columns.3.y, projection.columns.3.z, projection.columns.3.w]
-        ]
+        let projectionArray = matrixToRowMajorArray(projection)
 
         let cameraMetadata = CameraMetadata(
             intrinsics: intrinsicsArray,

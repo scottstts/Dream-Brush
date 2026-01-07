@@ -51,12 +51,14 @@ private struct AlignmentPayload: Codable {
     let modelToCapture4x4: [[Float]]?
     let modelToAnchor4x4: [[Float]]?
     let scale: Float?
+    let matrixLayout: String?
 
     enum CodingKeys: String, CodingKey {
         case modelToCaptureTransform
         case modelToCapture4x4 = "model_to_capture_4x4"
         case modelToAnchor4x4 = "model_to_anchor_4x4"
         case scale
+        case matrixLayout
     }
 }
 
@@ -256,7 +258,7 @@ final class SplatAssetManager: @unchecked Sendable {
         let destinationURL = assetFolder.appendingPathComponent(sourceURL.lastPathComponent)
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
 
-        let modelToCaptureTransform = loadAlignmentTransform(for: sourceURL)
+        let alignment = loadAlignmentTransform(for: sourceURL)
 
         _ = try sanitizeObjInfoLinesIfNeeded(at: destinationURL)
         let gaussianCount = try validateWithMetalSplatter(at: destinationURL)
@@ -271,7 +273,8 @@ final class SplatAssetManager: @unchecked Sendable {
             importedAt: Date(),
             gaussianCount: gaussianCount,
             associatedBundleId: associatedBundleId,
-            modelToCaptureTransform: modelToCaptureTransform
+            modelToCaptureTransform: alignment?.transform,
+            modelToCaptureLayout: alignment?.layout
         )
 
         try persistAsset(asset)
@@ -355,7 +358,7 @@ final class SplatAssetManager: @unchecked Sendable {
         return Int64((try Data(contentsOf: url)).count)
     }
 
-    private func loadAlignmentTransform(for sourceURL: URL) -> [[Float]]? {
+    private func loadAlignmentTransform(for sourceURL: URL) -> (transform: [[Float]]?, layout: String?)? {
         let directory = sourceURL.deletingLastPathComponent()
         let alignmentURL = directory.appendingPathComponent("alignment.json")
         guard fileManager.fileExists(atPath: alignmentURL.path) else { return nil }
@@ -372,7 +375,7 @@ final class SplatAssetManager: @unchecked Sendable {
                 transform = matrix
             }
 
-            return transform
+            return (transform: transform, layout: payload.matrixLayout)
         } catch {
             logger.warning("Failed to load alignment.json: \(error.localizedDescription)")
             return nil
