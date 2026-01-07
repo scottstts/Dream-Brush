@@ -61,6 +61,7 @@ final class CaptureSessionManager: NSObject {
         var enableDepth: Bool = true
         var enableSmoothedDepth: Bool = true
         var enableMeshReconstruction: Bool = false
+        var captureResolution: CaptureResolutionPreset = .max
 
         // Keyframe selection thresholds
         var translationThreshold: Float = 0.05 // 5cm
@@ -76,6 +77,7 @@ final class CaptureSessionManager: NSObject {
     private(set) var session: ARSession?
     private var currentBundle: CaptureBundle?
     private var recordingStartTime: Date?
+    private var recordingStartFrameTimestamp: TimeInterval?
     private var lastFrameTime: TimeInterval = 0
     private var lastKeyframePose: simd_float4x4?
     private var frameIndex = 0
@@ -87,6 +89,7 @@ final class CaptureSessionManager: NSObject {
 
     // Frame writing queue
     private let writeQueue = DispatchQueue(label: "com.scottsun.DreamBrush.frameWriter", qos: .userInitiated)
+    private let writeGroup = DispatchGroup()
 
     // Reusable CIContext for image processing (expensive to create)
     private static let sharedCIContext: CIContext = {
@@ -152,8 +155,8 @@ final class CaptureSessionManager: NSObject {
         let configuration = ARWorldTrackingConfiguration()
 
         // Enable depth if available and requested
-        if config.enableDepth && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            if config.enableSmoothedDepth && ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+        if self.config.enableDepth && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            if self.config.enableSmoothedDepth && ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
                 configuration.frameSemantics.insert(.smoothedSceneDepth)
                 logger.info("Enabled smoothed scene depth")
             } else {
@@ -167,16 +170,16 @@ final class CaptureSessionManager: NSObject {
         }
 
         // Enable mesh reconstruction if requested (for debugging/occlusion)
-        if config.enableMeshReconstruction && ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+        if self.config.enableMeshReconstruction && ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             configuration.sceneReconstruction = .mesh
             logger.info("Enabled mesh reconstruction")
         }
 
-        // High resolution capture for training quality
+        // Configure capture resolution
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
-        if let preferredFormat = formats.max(by: { $0.imageResolution.width < $1.imageResolution.width }) {
+        if let preferredFormat = selectVideoFormat(from: formats, targetLongEdge: self.config.captureResolution.targetLongEdge) {
             configuration.videoFormat = preferredFormat
-            logger.info("Using video format: \(preferredFormat.imageResolution.width)x\(preferredFormat.imageResolution.height)")
+            logger.info("Using video format: \(preferredFormat.imageResolution.width)x\(preferredFormat.imageResolution.height) (\(self.config.captureResolution.title))")
         }
 
         configuration.planeDetection = [.horizontal, .vertical]
@@ -186,6 +189,41 @@ final class CaptureSessionManager: NSObject {
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         isSessionRunning = true
         logger.info("ARSession started")
+    }
+
+    func updateCaptureResolution(_ preset: CaptureResolutionPreset) {
+        config.captureResolution = preset
+        guard isSessionRunning, !isRecording else { return }
+        startSession()
+    }
+
+    private func selectVideoFormat(from formats: [ARConfiguration.VideoFormat], targetLongEdge: Int?) -> ARConfiguration.VideoFormat? {
+        guard !formats.isEmpty else { return nil }
+
+        func longEdge(for format: ARConfiguration.VideoFormat) -> Int {
+            let width = Int(format.imageResolution.width.rounded())
+            let height = Int(format.imageResolution.height.rounded())
+            return max(width, height)
+        }
+
+        func area(for format: ARConfiguration.VideoFormat) -> Int {
+            let width = Int(format.imageResolution.width.rounded())
+            let height = Int(format.imageResolution.height.rounded())
+            return width * height
+        }
+
+        guard let targetLongEdge else {
+            return formats.max { area(for: $0) < area(for: $1) }
+        }
+
+        let belowOrEqual = formats.filter { longEdge(for: $0) <= targetLongEdge }
+        if let best = belowOrEqual.max(by: { (longEdge(for: $0), area(for: $0)) < (longEdge(for: $1), area(for: $1)) }) {
+            return best
+        }
+
+        let above = formats.filter { longEdge(for: $0) > targetLongEdge }
+        return above.min(by: { (longEdge(for: $0), area(for: $0)) < (longEdge(for: $1), area(for: $1)) })
+            ?? formats.max { area(for: $0) < area(for: $1) }
     }
 
     func pauseSession() {
@@ -205,12 +243,14 @@ final class CaptureSessionManager: NSObject {
             targetFPS: config.targetFPS,
             depthEnabled: config.enableDepth && depthAvailable,
             meshReconstructionEnabled: config.enableMeshReconstruction,
-            smoothedDepth: config.enableSmoothedDepth
+            smoothedDepth: config.enableSmoothedDepth,
+            captureResolution: config.captureResolution
         )
 
         let bundle = try CaptureBundleManager.shared.createBundle(settings: settings)
         currentBundle = bundle
         recordingStartTime = Date()
+        recordingStartFrameTimestamp = nil
         lastFrameTime = 0
         lastKeyframePose = nil
         frameIndex = 0
@@ -266,6 +306,11 @@ final class CaptureSessionManager: NSObject {
         let anchorData = buildAnchorData()
         try CaptureBundleManager.shared.writeAnchors(anchorData, to: bundle.bundleURL)
 
+        // Wait for any in-flight frame writes to finish before finalizing stats.
+        await waitForPendingWrites()
+        // Ensure queued main-thread stat updates have landed.
+        await MainActor.run { }
+
         // Calculate relocalization quality metrics
         let goodTrackingPercentage = totalFramesProcessed > 0
             ? Double(totalFramesWithGoodTracking) / Double(totalFramesProcessed)
@@ -314,6 +359,14 @@ final class CaptureSessionManager: NSObject {
                 } else {
                     continuation.resume(throwing: CaptureError.worldMapNotAvailable)
                 }
+            }
+        }
+    }
+
+    private func waitForPendingWrites() async {
+        await withCheckedContinuation { continuation in
+            writeGroup.notify(queue: .global(qos: .userInitiated)) {
+                continuation.resume()
             }
         }
     }
@@ -557,45 +610,51 @@ final class CaptureSessionManager: NSObject {
             return
         }
 
-        lastFrameTime = timestamp
-        frameIndex += 1
-        totalFramesProcessed += 1
-
-        let currentFrameIndex = frameIndex
         let pose = frame.camera.transform
         let isKeyframe = isKeyframe(currentPose: pose)
+        let nextFrameIndex = frameIndex + 1
 
+        // CRITICAL: Copy all frame data SYNCHRONOUSLY before dispatching
+        // ARFrame's pixel buffers become invalid after delegate returns
+        guard let capturedData = captureFrameData(frame, index: nextFrameIndex, isKeyframe: isKeyframe) else {
+            frameSemaphore.signal()
+            logger.error("Failed to capture frame data for index \(nextFrameIndex)")
+            return
+        }
+
+        lastFrameTime = timestamp
+        frameIndex = nextFrameIndex
+        totalFramesProcessed += 1
         if isKeyframe {
             lastKeyframePose = pose
         }
 
-        // CRITICAL: Copy all frame data SYNCHRONOUSLY before dispatching
-        // ARFrame's pixel buffers become invalid after delegate returns
-        guard let capturedData = captureFrameData(frame, index: currentFrameIndex, isKeyframe: isKeyframe) else {
-            frameSemaphore.signal()
-            logger.error("Failed to capture frame data for index \(currentFrameIndex)")
-            return
-        }
-
         // Now safely process on background queue
+        writeGroup.enter()
+        let frameSemaphore = self.frameSemaphore
+        let writeGroup = self.writeGroup
         writeQueue.async { [weak self] in
             guard let self = self else {
-                self?.frameSemaphore.signal()
+                frameSemaphore.signal()
+                writeGroup.leave()
                 return
             }
 
-            defer { self.frameSemaphore.signal() }
+            defer {
+                self.frameSemaphore.signal()
+                writeGroup.leave()
+            }
 
             // Use autorelease pool to ensure timely memory cleanup
             autoreleasepool {
                 do {
                     // Write RGB frame
-                    let rgbSize = try self.writeRGBFrame(capturedData.rgbImage, index: currentFrameIndex, to: bundle, isKeyframe: isKeyframe)
+                    let rgbSize = try self.writeRGBFrame(capturedData.rgbImage, index: nextFrameIndex, to: bundle, isKeyframe: isKeyframe)
 
                     // Write depth if available
                     var depthSize: Int64 = 0
                     if let depthData = capturedData.depthData {
-                        depthSize = try self.writeDepthData(depthData, index: currentFrameIndex, to: bundle)
+                        depthSize = try self.writeDepthData(depthData, index: nextFrameIndex, to: bundle)
                         DispatchQueue.main.async {
                             self.depthFrameCount += 1
                             self.totalFramesWithDepth += 1
@@ -603,7 +662,15 @@ final class CaptureSessionManager: NSObject {
                     }
 
                     // Write metadata
-                    let metaSize = try self.writeFrameMetadata(capturedData.metadata, index: currentFrameIndex, to: bundle)
+                    let metaSize = try self.writeFrameMetadata(capturedData.metadata, index: nextFrameIndex, to: bundle)
+
+                    if capturedData.metadata.tracking.state == "normal" {
+                        self.totalFramesWithGoodTracking += 1
+                    }
+                    if let depth = capturedData.metadata.depth {
+                        self.totalDepthConfidence += Double(depth.confidenceSummary.high)
+                        self.depthConfidenceCount += 1
+                    }
 
                     // Update stats on main thread
                     DispatchQueue.main.async {
@@ -619,7 +686,7 @@ final class CaptureSessionManager: NSObject {
                     }
 
                 } catch {
-                    self.logger.error("Failed to write frame \(currentFrameIndex): \(error.localizedDescription)")
+                    self.logger.error("Failed to write frame \(nextFrameIndex): \(error.localizedDescription)")
                 }
             }
         }
@@ -661,7 +728,10 @@ final class CaptureSessionManager: NSObject {
     private func buildFrameMetadata(from frame: ARFrame, index: Int, isKeyframe: Bool) -> FrameMetadata {
         let camera = frame.camera
         let timestamp = frame.timestamp
-        let startTime = recordingStartTime?.timeIntervalSince1970 ?? timestamp
+        if recordingStartFrameTimestamp == nil {
+            recordingStartFrameTimestamp = timestamp
+        }
+        let startTime = recordingStartFrameTimestamp ?? timestamp
 
         // Build camera metadata
         let intrinsics = camera.intrinsics
@@ -703,10 +773,11 @@ final class CaptureSessionManager: NSObject {
         )
 
         // Tracking metadata
+        let cameraTrackingState = camera.trackingState
         let trackingMetadata = TrackingMetadata(
-            state: trackingState.description,
-            stateReason: trackingStateReason(camera.trackingState),
-            worldMappingStatus: worldMappingStatus.description
+            state: cameraTrackingState.description,
+            stateReason: trackingStateReason(cameraTrackingState),
+            worldMappingStatus: frame.worldMappingStatus.description
         )
 
         // Depth metadata
@@ -739,36 +810,19 @@ final class CaptureSessionManager: NSObject {
     private func writeRGBFrame(_ cgImage: CGImage, index: Int, to bundle: CaptureBundle, isKeyframe: Bool) throws -> Int64 {
         let uiImage = UIImage(cgImage: cgImage)
 
-        // Use HEIC for efficiency, fallback to JPEG
         let fileName = String(format: "%06d", index)
-        let rgbURL = bundle.bundleURL.appendingPathComponent("frames/rgb/\(fileName).heic")
+        let jpegURL = bundle.bundleURL.appendingPathComponent("frames/rgb/\(fileName).jpg")
+        guard let jpegData = uiImage.jpegData(compressionQuality: 0.88) else {
+            throw CaptureError.imageConversionFailed
+        }
+        try jpegData.write(to: jpegURL, options: .atomic)
 
-        if let heicData = uiImage.heicData(compressionQuality: 0.85) {
-            try heicData.write(to: rgbURL, options: .atomic)
-
-            // Also save as keyframe if applicable
-            if isKeyframe {
-                let keyframeURL = bundle.bundleURL.appendingPathComponent("keyframes/\(fileName).jpg")
-                if let jpegData = uiImage.jpegData(compressionQuality: 0.9) {
-                    try jpegData.write(to: keyframeURL, options: .atomic)
-                }
-            }
-
-            return Int64(heicData.count)
-        } else if let jpegData = uiImage.jpegData(compressionQuality: 0.9) {
-            // Fallback to JPEG
-            let jpegURL = bundle.bundleURL.appendingPathComponent("frames/rgb/\(fileName).jpg")
-            try jpegData.write(to: jpegURL, options: .atomic)
-
-            if isKeyframe {
-                let keyframeURL = bundle.bundleURL.appendingPathComponent("keyframes/\(fileName).jpg")
-                try jpegData.write(to: keyframeURL, options: .atomic)
-            }
-
-            return Int64(jpegData.count)
+        if isKeyframe {
+            let keyframeURL = bundle.bundleURL.appendingPathComponent("keyframes/\(fileName).jpg")
+            try jpegData.write(to: keyframeURL, options: .atomic)
         }
 
-        throw CaptureError.imageConversionFailed
+        return Int64(jpegData.count)
     }
 
     private func writeDepthData(_ pngData: Data, index: Int, to bundle: CaptureBundle) throws -> Int64 {
@@ -920,11 +974,6 @@ extension CaptureSessionManager: ARSessionDelegate {
             setRootAnchorIfReady(frame: frame, session: session)
         }
 
-        // Track quality metrics
-        if isRecording {
-            updateQualityMetrics(frame: frame)
-        }
-
         // Process frame if recording
         processFrame(frame)
     }
@@ -975,22 +1024,6 @@ extension CaptureSessionManager: ARSessionDelegate {
 
         logger.info("Root anchor set at camera pose, mapping status: \(self.worldMappingStatus.description)")
     }
-
-    /// Updates quality metrics during recording
-    private func updateQualityMetrics(frame: ARFrame) {
-        // Track good tracking frames
-        if trackingState == .normal {
-            totalFramesWithGoodTracking += 1
-        }
-
-        // Track depth confidence
-        if let confidenceMap = frame.smoothedSceneDepth?.confidenceMap ?? frame.sceneDepth?.confidenceMap {
-            let summary = calculateConfidenceSummary(confidenceMap)
-            // Use high confidence percentage as the metric
-            totalDepthConfidence += Double(summary.high)
-            depthConfidenceCount += 1
-        }
-    }
 }
 
 // MARK: - Error Types
@@ -1036,21 +1069,5 @@ extension ARFrame.WorldMappingStatus: @retroactive CustomStringConvertible {
         case .mapped: return "mapped"
         @unknown default: return "unknown"
         }
-    }
-}
-
-extension UIImage {
-    func heicData(compressionQuality: CGFloat) -> Data? {
-        guard let cgImage = self.cgImage else { return nil }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, "public.heic" as CFString, 1, nil) else {
-            return nil
-        }
-        let options: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: compressionQuality
-        ]
-        CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return data as Data
     }
 }

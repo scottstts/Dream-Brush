@@ -9,6 +9,9 @@
 *.swp
 *~
 
+# Project data
+export_bundle_samples/
+
 # Xcode
 build/
 DerivedData/

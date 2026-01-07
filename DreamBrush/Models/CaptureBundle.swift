@@ -77,17 +77,52 @@ struct CaptureSettings: Codable {
     let depthEnabled: Bool
     let meshReconstructionEnabled: Bool
     let smoothedDepth: Bool
+    let captureResolution: CaptureResolutionPreset
 
     init(
         targetFPS: Int = 10,
         depthEnabled: Bool = true,
         meshReconstructionEnabled: Bool = false,
-        smoothedDepth: Bool = true
+        smoothedDepth: Bool = true,
+        captureResolution: CaptureResolutionPreset = .max
     ) {
         self.targetFPS = targetFPS
         self.depthEnabled = depthEnabled
         self.meshReconstructionEnabled = meshReconstructionEnabled
         self.smoothedDepth = smoothedDepth
+        self.captureResolution = captureResolution
+    }
+}
+
+enum CaptureResolutionPreset: String, Codable, CaseIterable, Identifiable {
+    case max
+    case twoK
+    case p1080
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .max: return "Max"
+        case .twoK: return "2K"
+        case .p1080: return "1080p"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .max: return "Best quality"
+        case .twoK: return "Smaller files"
+        case .p1080: return "Fastest training"
+        }
+    }
+
+    var targetLongEdge: Int? {
+        switch self {
+        case .max: return nil
+        case .twoK: return 2560
+        case .p1080: return 1920
+        }
     }
 }
 
@@ -208,6 +243,7 @@ struct CoordinateConventions: Codable {
     let handedness: String
     let matrixLayout: String
     let transformDirection: String
+    let intrinsicsLayout: String?
     let upAxis: String
     let units: String
 
@@ -215,6 +251,7 @@ struct CoordinateConventions: Codable {
         self.handedness = "right"
         self.matrixLayout = "column_major"
         self.transformDirection = "camera_to_world"
+        self.intrinsicsLayout = "row_major"
         self.upAxis = "Y"
         self.units = "meters"
     }

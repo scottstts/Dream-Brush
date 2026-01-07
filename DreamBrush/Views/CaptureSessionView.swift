@@ -174,6 +174,10 @@ struct CaptureSessionView: View {
                 }
             }
 
+            if !sessionManager.isRecording {
+                captureSettingsView
+            }
+
             // Helper text
             if !sessionManager.isRecording {
                 Text(canStartRecording ? "Tap to start recording" : "Waiting for good tracking...")
@@ -219,6 +223,29 @@ struct CaptureSessionView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+    }
+
+    private var captureSettingsView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Capture Resolution")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+
+            Picker("Capture Resolution", selection: resolutionBinding) {
+                ForEach(CaptureResolutionPreset.allCases) { preset in
+                    Text(preset.title).tag(preset)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(resolutionBinding.wrappedValue.subtitle)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(.ultraThinMaterial)
         .cornerRadius(12)
     }
@@ -309,6 +336,15 @@ struct CaptureSessionView: View {
 
     private func formatBytes(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private var resolutionBinding: Binding<CaptureResolutionPreset> {
+        Binding(
+            get: { self.sessionManager.config.captureResolution },
+            set: { newValue in
+                self.sessionManager.updateCaptureResolution(newValue)
+            }
+        )
     }
 }
 

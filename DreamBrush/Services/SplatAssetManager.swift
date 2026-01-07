@@ -46,6 +46,20 @@ struct PlyHeaderInfo {
     let format: String?
 }
 
+private struct AlignmentPayload: Codable {
+    let modelToCaptureTransform: [[Float]]?
+    let modelToCapture4x4: [[Float]]?
+    let modelToAnchor4x4: [[Float]]?
+    let scale: Float?
+
+    enum CodingKeys: String, CodingKey {
+        case modelToCaptureTransform
+        case modelToCapture4x4 = "model_to_capture_4x4"
+        case modelToAnchor4x4 = "model_to_anchor_4x4"
+        case scale
+    }
+}
+
 enum SplatAssetValidator {
     private static let headerTerminator = "end_header"
     private static let headerTerminatorData = Data(headerTerminator.utf8)
@@ -242,6 +256,8 @@ final class SplatAssetManager: @unchecked Sendable {
         let destinationURL = assetFolder.appendingPathComponent(sourceURL.lastPathComponent)
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
 
+        let modelToCaptureTransform = loadAlignmentTransform(for: sourceURL)
+
         _ = try sanitizeObjInfoLinesIfNeeded(at: destinationURL)
         let gaussianCount = try validateWithMetalSplatter(at: destinationURL)
         let fileSize = try fileSizeForItem(at: destinationURL)
@@ -254,7 +270,8 @@ final class SplatAssetManager: @unchecked Sendable {
             fileSize: fileSize,
             importedAt: Date(),
             gaussianCount: gaussianCount,
-            associatedBundleId: associatedBundleId
+            associatedBundleId: associatedBundleId,
+            modelToCaptureTransform: modelToCaptureTransform
         )
 
         try persistAsset(asset)
@@ -336,6 +353,41 @@ final class SplatAssetManager: @unchecked Sendable {
             return size.int64Value
         }
         return Int64((try Data(contentsOf: url)).count)
+    }
+
+    private func loadAlignmentTransform(for sourceURL: URL) -> [[Float]]? {
+        let directory = sourceURL.deletingLastPathComponent()
+        let alignmentURL = directory.appendingPathComponent("alignment.json")
+        guard fileManager.fileExists(atPath: alignmentURL.path) else { return nil }
+
+        do {
+            let data = try Data(contentsOf: alignmentURL)
+            let payload = try jsonDecoder.decode(AlignmentPayload.self, from: data)
+            var transform = payload.modelToCaptureTransform
+                ?? payload.modelToCapture4x4
+                ?? payload.modelToAnchor4x4
+
+            if var matrix = transform, let scale = payload.scale, scale != 1 {
+                matrix = applyUniformScale(scale, to: matrix)
+                transform = matrix
+            }
+
+            return transform
+        } catch {
+            logger.warning("Failed to load alignment.json: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func applyUniformScale(_ scale: Float, to matrix: [[Float]]) -> [[Float]] {
+        guard matrix.count == 4, matrix.allSatisfy({ $0.count == 4 }) else { return matrix }
+        var scaled = matrix
+        for col in 0..<3 {
+            for row in 0..<4 {
+                scaled[col][row] *= scale
+            }
+        }
+        return scaled
     }
 
     private func validateWithMetalSplatter(at url: URL) throws -> Int {
