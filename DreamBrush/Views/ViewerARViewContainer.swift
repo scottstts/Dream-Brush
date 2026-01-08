@@ -33,6 +33,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
     let splatURL: URL?
     let renderTransform: simd_float4x4?
     let shouldRender: Bool
+    let showCameraFeed: Bool
     let renderMode: RenderMode
     let preferredFramesPerSecond: Int
     let renderScale: CGFloat
@@ -74,6 +75,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             renderTransform: renderTransform,
             renderMode: renderMode
         )
+        container.setCameraFeedVisible(showCameraFeed)
 
         return container
     }
@@ -102,6 +104,7 @@ struct ViewerARViewContainer: UIViewRepresentable {
             renderStride: renderStride
         )
         context.coordinator.updateSplatURL(splatURL)
+        uiView.setCameraFeedVisible(showCameraFeed)
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
@@ -510,6 +513,8 @@ private extension UIInterfaceOrientation {
 }
 
 final class ViewerARContainerView: UIView {
+    private var cameraFeedVisible = true
+
     let arView: ARSCNView = {
         let view = ARSCNView()
         view.automaticallyUpdatesLighting = true
@@ -545,5 +550,18 @@ final class ViewerARContainerView: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func setCameraFeedVisible(_ isVisible: Bool) {
+        guard cameraFeedVisible != isVisible else { return }
+        cameraFeedVisible = isVisible
+
+        arView.alpha = isVisible ? 1 : 0
+        arView.isHidden = false
+
+        backgroundColor = isVisible ? .clear : .black
+        metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        metalView.isOpaque = false
+        metalView.backgroundColor = .clear
     }
 }

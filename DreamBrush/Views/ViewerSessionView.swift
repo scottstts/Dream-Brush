@@ -40,6 +40,7 @@ struct ViewerSessionView: View {
                 splatURL: asset.fileURL,
                 renderTransform: sessionManager.alignmentTransform,
                 shouldRender: effectiveShouldRender,
+                showCameraFeed: !sessionManager.shouldRender,
                 renderMode: currentRenderMode,
                 preferredFramesPerSecond: qualityPreset.targetFPS,
                 renderScale: qualityPreset.renderScale,
