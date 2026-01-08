@@ -26,6 +26,10 @@ CaptureBundle_<bundleId>/
       000001.png                   (optional per-frame)
       000002.png
       ...
+    confidence/
+      000001.png                   (optional per-frame)
+      000002.png
+      ...
     meta/
       000001.json
       000002.json
@@ -44,12 +48,14 @@ CaptureBundle_<bundleId>/
 - Optional files:
   - `worldmap.arexperience` (absent in older or failed captures; used for relocalization)
   - `thumb.jpg` (read by UI if present; not created by capture code)
+  - `frames/confidence/` (per-frame confidence maps when available)
 
 ## Naming and indexing
 - Frames are numbered with **6-digit, zero-padded, 1-based indices**.
   - Example: `000001.jpg`, `000001.json`, `000001.png`.
 - `frames/rgb/*.jpg` and `frames/meta/*.json` exist for every captured frame.
 - `frames/depth/*.png` is only written when depth data is available for that frame.
+- `frames/confidence/*.png` is only written when a confidence map is available for that frame.
 - `keyframes/*.jpg` is a subset of the RGB frames, using the same index as the source frame.
 
 ## File formats
@@ -79,6 +85,7 @@ CaptureSettings
 - meshReconstructionEnabled: Bool
 - smoothedDepth: Bool
 - captureResolution: CaptureResolutionPreset     // "max" | "twoK" | "p1080"
+- depthConfidenceDownsampleFactor: Int?          // optional (1 = full res)
 
 CaptureStats
 - durationSeconds: Double
@@ -154,6 +161,15 @@ Notes:
 - Each pixel is **depth in millimeters**, clamped to `[0, 65535]` and stored as `UInt16`.
 - PNG is written only if a depth map is available for that frame.
 - The depth map is taken from `ARFrame.smoothedSceneDepth` when available, otherwise `ARFrame.sceneDepth`.
+
+### frames/confidence/*.png
+- 8-bit grayscale PNG.
+- Each pixel is `ARConfidenceLevel` raw value:
+  - `0` = low
+  - `1` = medium
+  - `2` = high
+- PNG is written only if a confidence map is available for that frame.
+- Resolution may be downsampled from the original confidence map; consumers should read the PNG dimensions rather than assume it matches depth.
 
 ### frames/meta/*.json
 - JSON, pretty-printed, sorted keys.

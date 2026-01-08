@@ -59,6 +59,7 @@ final class CaptureBundleManager: @unchecked Sendable {
             "keyframes",
             "frames/rgb",
             "frames/depth",
+            "frames/confidence",
             "frames/meta"
         ]
 

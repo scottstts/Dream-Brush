@@ -11,6 +11,7 @@
 
 # Project data
 export_bundle_samples/
+refs/
 
 # Xcode
 build/

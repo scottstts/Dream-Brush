@@ -78,19 +78,22 @@ struct CaptureSettings: Codable {
     let meshReconstructionEnabled: Bool
     let smoothedDepth: Bool
     let captureResolution: CaptureResolutionPreset
+    let depthConfidenceDownsampleFactor: Int?
 
     init(
         targetFPS: Int = 10,
         depthEnabled: Bool = true,
         meshReconstructionEnabled: Bool = false,
         smoothedDepth: Bool = true,
-        captureResolution: CaptureResolutionPreset = .max
+        captureResolution: CaptureResolutionPreset = .max,
+        depthConfidenceDownsampleFactor: Int? = nil
     ) {
         self.targetFPS = targetFPS
         self.depthEnabled = depthEnabled
         self.meshReconstructionEnabled = meshReconstructionEnabled
         self.smoothedDepth = smoothedDepth
         self.captureResolution = captureResolution
+        self.depthConfidenceDownsampleFactor = depthConfidenceDownsampleFactor
     }
 }
 
