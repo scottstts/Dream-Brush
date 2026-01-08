@@ -858,7 +858,8 @@ final class CaptureSessionManager: NSObject {
                 // Convert to millimeters, clamp to UInt16 range
                 let depthMM = depthMeters * 1000.0
                 let clampedDepth = max(0, min(65535, depthMM))
-                uint16Data[y * width + x] = UInt16(clampedDepth)
+                // Store big-endian to match PNG 16-bit sample ordering
+                uint16Data[y * width + x] = UInt16(clampedDepth).bigEndian
             }
         }
 
@@ -866,6 +867,8 @@ final class CaptureSessionManager: NSObject {
         let bitsPerComponent = 16
         let bitsPerPixel = 16
         let bytesPerRowOut = width * 2
+
+        let bitmapInfo = CGBitmapInfo.byteOrder16Big.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue))
 
         guard let provider = CGDataProvider(data: Data(bytes: &uint16Data, count: uint16Data.count * 2) as CFData),
               let cgImage = CGImage(
@@ -875,7 +878,7 @@ final class CaptureSessionManager: NSObject {
                   bitsPerPixel: bitsPerPixel,
                   bytesPerRow: bytesPerRowOut,
                   space: CGColorSpaceCreateDeviceGray(),
-                  bitmapInfo: CGBitmapInfo(rawValue: 0),
+                  bitmapInfo: bitmapInfo,
                   provider: provider,
                   decode: nil,
                   shouldInterpolate: false,
