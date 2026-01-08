@@ -10,6 +10,7 @@
 *~
 
 # Project data
+__pycache__/
 export_bundle_samples/
 refs/
 

@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cached_property
+import os
 from pathlib import Path
 from typing import Dict, ForwardRef, Generic, List, Literal, Optional, Tuple, Type, Union, cast, get_args, get_origin
 
@@ -63,12 +64,34 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     new images. If -1, never pick new images."""
     eval_image_indices: Optional[Tuple[int, ...]] = (0,)
     """Specifies the image indices to use during eval; if None, uses all."""
-    cache_images: Literal["cpu", "gpu"] = "gpu"
-    """Whether to cache images in memory. If "cpu", caches on cpu. If "gpu", caches on device."""
+    cache_images: Literal["cpu", "gpu", "lazy", "auto"] = "auto"
+    """Whether to cache images in memory. If "lazy", load per-image on demand."""
     cache_images_type: Literal["uint8", "float32"] = "float32"
     """The image type returned from manager, caching images in uint8 saves memory"""
+    allow_large_gpu_cache: bool = False
+    """If True, do not override GPU caching for datasets over 500 images."""
+    gpu_cache_max_fraction: float = 0.6
+    """Max fraction of total GPU memory to use for cached images before falling back to CPU."""
     max_thread_workers: Optional[int] = None
     """The maximum number of threads to use for caching images. If None, uses all available threads."""
+    non_blocking_transfers: bool = True
+    """Use non-blocking transfers when moving pinned CPU tensors to GPU."""
+    prefetch_to_gpu: bool = True
+    """If True, prefetch the next batch to GPU using a dedicated CUDA stream (when caching on CPU)."""
+    cv2_num_threads: Optional[int] = None
+    """Optional override for OpenCV internal thread count."""
+    cv2_use_optimized: bool = True
+    """Enable OpenCV optimizations if available."""
+    preprocessed_data: bool = False
+    """If True, assume images are already undistorted/resized and skip eager caching by default."""
+    depth_resize_mode: Literal["image", "native", "max_edge"] = "native"
+    """How to resize depth/confidence before caching. 'native' keeps sensor resolution."""
+    depth_max_edge: int = 480
+    """If depth_resize_mode is 'max_edge', cap the longest edge to this many pixels."""
+    depth_dtype: Literal["float32", "float16"] = "float16"
+    """Depth dtype when cached in memory."""
+    confidence_dtype: Literal["float32", "float16", "uint8"] = "uint8"
+    """Confidence dtype when cached in memory."""
     train_cameras_sampling_strategy: Literal["random", "fps"] = "random"
     """Specifies which sampling strategy is used to generate train cameras, 'random' means sampling 
     uniformly random without replacement, 'fps' means farthest point sampling which is helpful to reduce the artifacts 
@@ -118,9 +141,16 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             self.dataparser.downscale_factor = 1  # Avoid opening images
         self.includes_time = self.dataparser.includes_time
 
+        if self.config.cv2_use_optimized:
+            cv2.setUseOptimized(True)
+        if self.config.cv2_num_threads is not None:
+            cv2.setNumThreads(self.config.cv2_num_threads)
+
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
+        self._lazy_train_cache: Dict[int, Dict[str, torch.Tensor]] = {}
+        self._lazy_eval_cache: Dict[int, Dict[str, torch.Tensor]] = {}
         self.train_depth_filenames = self.train_dataparser_outputs.metadata.get("depth_filenames")
         self.train_confidence_filenames = self.train_dataparser_outputs.metadata.get("confidence_filenames")
         self.train_depth_unit_scale = self.train_dataparser_outputs.metadata.get("depth_unit_scale_factor", 1.0)
@@ -131,12 +161,11 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.eval_confidence_filenames = eval_outputs.metadata.get("confidence_filenames")
         self.eval_depth_unit_scale = eval_outputs.metadata.get("depth_unit_scale_factor", 1.0)
         self.eval_depth_scale = eval_outputs.dataparser_scale
-        if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
-            CONSOLE.print(
-                "Train dataset has over 500 images, overriding cache_images to cpu",
-                style="bold yellow",
-            )
-            self.config.cache_images = "cpu"
+
+        if self.config.preprocessed_data and self.config.cache_images == "auto":
+            self.config.cache_images = "lazy"
+        self.config.cache_images = self._select_cache_images_device()
+
         self.exclude_batch_keys_from_device = self.train_dataset.exclude_batch_keys_from_device
         if self.config.masks_on_gpu is True:
             self.exclude_batch_keys_from_device.remove("mask")
@@ -148,7 +177,117 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 
+        if self.config.cache_images == "lazy":
+            self.train_cameras = self.train_dataset.cameras
+
+        self._prefetch_stream: Optional[torch.cuda.Stream] = None
+        self._prefetch_train: Optional[Tuple[Cameras, Dict]] = None
+        self._prefetch_train_idx: Optional[int] = None
+        if (
+            self.config.prefetch_to_gpu
+            and self.config.cache_images in ("cpu", "lazy")
+            and torch.cuda.is_available()
+            and torch.device(self.device).type == "cuda"
+        ):
+            self._prefetch_stream = torch.cuda.Stream(device=self.device)
+
         super().__init__()
+
+    def _select_cache_images_device(self) -> Literal["cpu", "gpu", "lazy"]:
+        requested = self.config.cache_images
+        if requested == "lazy":
+            return "lazy"
+
+        if requested == "auto":
+            requested = "gpu"
+
+        if requested == "gpu":
+            if not torch.cuda.is_available() or torch.device(self.device).type != "cuda":
+                CONSOLE.log("[yellow]cache_images='gpu' but CUDA is unavailable; using cpu.")
+                return "cpu"
+            if len(self.train_dataset) > 500 and not self.config.allow_large_gpu_cache:
+                CONSOLE.print(
+                    "Train dataset has over 500 images, overriding cache_images to cpu",
+                    style="bold yellow",
+                )
+                return "cpu"
+            est_bytes = self._estimate_cache_bytes("train")
+            if est_bytes is not None:
+                free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+                limit = int(total_bytes * float(self.config.gpu_cache_max_fraction))
+                limit = min(limit, int(free_bytes * float(self.config.gpu_cache_max_fraction)))
+                if est_bytes > limit:
+                    CONSOLE.print(
+                        f"[yellow]Estimated GPU cache size {est_bytes / (1024**3):.2f} GiB exceeds "
+                        f"limit {limit / (1024**3):.2f} GiB; using cpu cache instead."
+                    )
+                    return "cpu"
+            return "gpu"
+
+        return "cpu"
+
+    def _estimate_cache_bytes(self, split: Literal["train", "eval"]) -> Optional[int]:
+        dataset = self.train_dataset if split == "train" else self.eval_dataset
+        if len(dataset) == 0:
+            return None
+        try:
+            image_h = int(dataset.cameras.height[0].item())
+            image_w = int(dataset.cameras.width[0].item())
+        except Exception:
+            return None
+
+        if self.config.cache_images_type == "float32":
+            image_bytes = 4
+        else:
+            image_bytes = 1
+        image_total = len(dataset) * image_h * image_w * 3 * image_bytes
+
+        depth_filenames = self.train_depth_filenames if split == "train" else self.eval_depth_filenames
+        confidence_filenames = self.train_confidence_filenames if split == "train" else self.eval_confidence_filenames
+
+        depth_total = 0
+        confidence_total = 0
+        if depth_filenames:
+            depth_h, depth_w = self._estimate_depth_shape(depth_filenames, image_h, image_w)
+            depth_bytes = 2 if self.config.depth_dtype == "float16" else 4
+            depth_total = len(depth_filenames) * depth_h * depth_w * depth_bytes
+        if confidence_filenames:
+            conf_h, conf_w = self._estimate_depth_shape(confidence_filenames, image_h, image_w)
+            if self.config.confidence_dtype == "uint8":
+                conf_bytes = 1
+            elif self.config.confidence_dtype == "float16":
+                conf_bytes = 2
+            else:
+                conf_bytes = 4
+            confidence_total = len(confidence_filenames) * conf_h * conf_w * conf_bytes
+
+        total = int((image_total + depth_total + confidence_total) * 1.05)  # safety margin
+        return total
+
+    def _estimate_depth_shape(self, filenames: List[Path], image_h: int, image_w: int) -> Tuple[int, int]:
+        source_h, source_w = image_h, image_w
+        for path in filenames:
+            if path and Path(path).exists():
+                depth_raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                if depth_raw is not None:
+                    source_h, source_w = depth_raw.shape[:2]
+                    break
+
+        mode = self.config.depth_resize_mode
+        if mode == "image":
+            return image_h, image_w
+        if mode == "native":
+            return source_h, source_w
+        if mode == "max_edge":
+            max_edge = max(1, int(self.config.depth_max_edge))
+            max_source = max(source_h, source_w)
+            if max_source <= max_edge:
+                return source_h, source_w
+            scale = max_edge / float(max_source)
+            target_h = max(1, int(round(source_h * scale)))
+            target_w = max(1, int(round(source_w * scale)))
+            return target_h, target_w
+        assert_never(mode)
 
     def sample_train_cameras(self):
         """Return a list of camera indices sampled using the strategy specified by
@@ -190,12 +329,16 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def cached_train(self) -> List[Dict[str, torch.Tensor]]:
         """Get the training images. Will load and undistort the images the
         first time this (cached) property is accessed."""
+        if self.config.cache_images == "lazy":
+            return []
         return self._load_images("train", cache_images_device=self.config.cache_images)
 
     @cached_property
     def cached_eval(self) -> List[Dict[str, torch.Tensor]]:
         """Get the eval images. Will load and undistort the images the
         first time this (cached) property is accessed."""
+        if self.config.cache_images == "lazy":
+            return []
         return self._load_images("eval", cache_images_device=self.config.cache_images)
 
     def _load_images(
@@ -211,34 +354,48 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         else:
             assert_never(split)
 
+        depth_filenames = self.train_depth_filenames if split == "train" else self.eval_depth_filenames
+        confidence_filenames = self.train_confidence_filenames if split == "train" else self.eval_confidence_filenames
+        depth_unit_scale = self.train_depth_unit_scale if split == "train" else self.eval_depth_unit_scale
+        depth_scale = self.train_depth_scale if split == "train" else self.eval_depth_scale
+
+        def resolve_depth_target_size(
+            source_h: int, source_w: int, image_h: int, image_w: int
+        ) -> Tuple[int, int]:
+            mode = self.config.depth_resize_mode
+            if mode == "image":
+                return image_h, image_w
+            if mode == "native":
+                return source_h, source_w
+            if mode == "max_edge":
+                max_edge = max(1, int(self.config.depth_max_edge))
+                max_source = max(source_h, source_w)
+                if max_source <= max_edge:
+                    return source_h, source_w
+                scale = max_edge / float(max_source)
+                target_h = max(1, int(round(source_h * scale)))
+                target_w = max(1, int(round(source_w * scale)))
+                return target_h, target_w
+            assert_never(mode)
+
         def undistort_idx(idx: int) -> Dict[str, torch.Tensor]:
-            data = dataset.get_data(idx, image_type=self.config.cache_images_type)
-            camera = dataset.cameras[idx].reshape(())
-            assert data["image"].shape[1] == camera.width.item() and data["image"].shape[0] == camera.height.item(), (
-                f'The size of image ({data["image"].shape[1]}, {data["image"].shape[0]}) loaded '
-                f'does not match the camera parameters ({camera.width.item(), camera.height.item()})'
+            cache = self._load_and_process_image(dataset, idx)
+            self._attach_depth_confidence(
+                idx=idx,
+                cache=cache,
+                depth_filenames=depth_filenames,
+                confidence_filenames=confidence_filenames,
+                depth_unit_scale=depth_unit_scale,
+                depth_scale=depth_scale,
+                resolve_depth_target_size=resolve_depth_target_size,
             )
-            if camera.distortion_params is None or torch.all(camera.distortion_params == 0):
-                return data
-            K = camera.get_intrinsics_matrices().numpy()
-            distortion_params = camera.distortion_params.numpy()
-            image = data["image"].numpy()
-
-            K, image, mask = _undistort_image(camera, distortion_params, data, image, K)
-            data["image"] = torch.from_numpy(image)
-            if mask is not None:
-                data["mask"] = mask
-
-            dataset.cameras.fx[idx] = float(K[0, 0])
-            dataset.cameras.fy[idx] = float(K[1, 1])
-            dataset.cameras.cx[idx] = float(K[0, 2])
-            dataset.cameras.cy[idx] = float(K[1, 2])
-            dataset.cameras.width[idx] = image.shape[1]
-            dataset.cameras.height[idx] = image.shape[0]
-            return data
+            return cache
 
         CONSOLE.log(f"Caching / undistorting {split} images")
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        max_workers = self.config.max_thread_workers
+        if max_workers is None:
+            max_workers = os.cpu_count() or 4
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             undistorted_images = list(
                 track(
                     executor.map(
@@ -251,66 +408,15 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
                 )
             )
 
-        # Add depth/confidence if available, then move to device.
-        depth_filenames = self.train_depth_filenames if split == "train" else self.eval_depth_filenames
-        confidence_filenames = self.train_confidence_filenames if split == "train" else self.eval_confidence_filenames
-        depth_unit_scale = self.train_depth_unit_scale if split == "train" else self.eval_depth_unit_scale
-        depth_scale = self.train_depth_scale if split == "train" else self.eval_depth_scale
-
-        if depth_filenames:
-            for idx, cache in enumerate(undistorted_images):
-                if idx >= len(depth_filenames):
-                    break
-                depth_path = depth_filenames[idx]
-                if not depth_path or not Path(depth_path).exists():
-                    continue
-                depth_raw = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
-                if depth_raw is None:
-                    continue
-                depth = depth_raw.astype(np.float32) * float(depth_unit_scale)
-                target_h, target_w = cache["image"].shape[0], cache["image"].shape[1]
-                if depth.shape[0] != target_h or depth.shape[1] != target_w:
-                    depth = cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-                cache["depth"] = torch.from_numpy(depth)[..., None]
-                cache["depth_scale"] = float(depth_scale)
-
-        if confidence_filenames:
-            for idx, cache in enumerate(undistorted_images):
-                if idx >= len(confidence_filenames):
-                    break
-                confidence_path = confidence_filenames[idx]
-                if not confidence_path or not Path(confidence_path).exists():
-                    continue
-                confidence_raw = cv2.imread(str(confidence_path), cv2.IMREAD_UNCHANGED)
-                if confidence_raw is None:
-                    continue
-                confidence = confidence_raw.astype(np.float32)
-                target_h, target_w = cache["image"].shape[0], cache["image"].shape[1]
-                if confidence.shape[0] != target_h or confidence.shape[1] != target_w:
-                    confidence = cv2.resize(confidence, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-                cache["confidence"] = torch.from_numpy(confidence)[..., None]
-
         # Move to device.
         if cache_images_device == "gpu":
             for cache in undistorted_images:
-                cache["image"] = cache["image"].to(self.device)
-                if "mask" in cache:
-                    cache["mask"] = cache["mask"].to(self.device)
-                if "depth" in cache:
-                    cache["depth"] = cache["depth"].to(self.device)
-                if "confidence" in cache:
-                    cache["confidence"] = cache["confidence"].to(self.device)
-                self.train_cameras = self.train_dataset.cameras.to(self.device)
+                self._prepare_cache_for_device(cache, cache_images_device)
+            self.train_cameras = self.train_dataset.cameras.to(self.device)
         elif cache_images_device == "cpu":
             for cache in undistorted_images:
-                cache["image"] = cache["image"].pin_memory()
-                if "mask" in cache:
-                    cache["mask"] = cache["mask"].pin_memory()
-                if "depth" in cache:
-                    cache["depth"] = cache["depth"].pin_memory()
-                if "confidence" in cache:
-                    cache["confidence"] = cache["confidence"].pin_memory()
-                self.train_cameras = self.train_dataset.cameras
+                self._prepare_cache_for_device(cache, cache_images_device)
+            self.train_cameras = self.train_dataset.cameras
         else:
             assert_never(cache_images_device)
 
@@ -370,7 +476,10 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         Pretends to be the dataloader for evaluation, it returns a list of (camera, data) tuples
         """
         image_indices = [i for i in range(len(self.eval_dataset))]
-        data = [d.copy() for d in self.cached_eval]
+        if self.config.cache_images == "lazy":
+            data = [self._get_cached_data("eval", i).copy() for i in image_indices]
+        else:
+            data = [d.copy() for d in self.cached_eval]
         _cameras = deepcopy(self.eval_dataset.cameras).to(self.device)
         cameras = []
         for i in image_indices:
@@ -388,33 +497,51 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
     def get_train_rays_per_batch(self):
         """Returns resolution of the image returned from datamanager."""
+        if self.config.cache_images == "lazy":
+            cache = self._get_cached_data("train", 0)
+            h = cache["image"].shape[0]
+            w = cache["image"].shape[1]
+            return h * w
         if len(self.cached_train) != 0:
             h = self.cached_train[0]["image"].shape[0]
             w = self.cached_train[0]["image"].shape[1]
             return h * w
-        else:
-            return 800 * 800
+        return 800 * 800
 
     def next_train(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next training batch
 
         Returns a Camera instead of raybundle"""
+        if self._prefetch_stream is not None:
+            self._prefetch_next_train()
+
         image_idx = self.train_unseen_cameras.pop(0)
         # Make sure to re-populate the unseen cameras list if we have exhausted it
         if len(self.train_unseen_cameras) == 0:
             self.train_unseen_cameras = self.sample_train_cameras()
 
-        data = self.cached_train[image_idx]
-        # We're going to copy to make sure we don't mutate the cached dictionary.
-        # This can cause a memory leak: https://github.com/nerfstudio-project/nerfstudio/issues/3335
-        data = data.copy()
-        data["image"] = data["image"].to(self.device)
+        if self._prefetch_stream is not None and self._prefetch_train_idx == image_idx:
+            torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+            assert self._prefetch_train is not None
+            camera, data = self._prefetch_train
+            self._prefetch_train = None
+            self._prefetch_train_idx = None
+        else:
+            data = self._get_cached_data("train", image_idx)
+            # We're going to copy to make sure we don't mutate the cached dictionary.
+            # This can cause a memory leak: https://github.com/nerfstudio-project/nerfstudio/issues/3335
+            data = data.copy()
+            self._move_batch_to_device(data)
 
-        assert len(self.train_cameras.shape) == 1, "Assumes single batch dimension"
-        camera = self.train_cameras[image_idx : image_idx + 1].to(self.device)
-        if camera.metadata is None:
-            camera.metadata = {}
-        camera.metadata["cam_idx"] = image_idx
+            assert len(self.train_cameras.shape) == 1, "Assumes single batch dimension"
+            camera = self.train_cameras[image_idx : image_idx + 1].to(self.device)
+            if camera.metadata is None:
+                camera.metadata = {}
+            camera.metadata["cam_idx"] = image_idx
+
+        if self._prefetch_stream is not None:
+            self._prefetch_next_train()
+
         return camera, data
 
     def next_eval(self, step: int) -> Tuple[Cameras, Dict]:
@@ -433,12 +560,182 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # Make sure to re-populate the unseen cameras list if we have exhausted it
         if len(self.eval_unseen_cameras) == 0:
             self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
-        data = self.cached_eval[image_idx]
+        data = self._get_cached_data("eval", image_idx)
         data = data.copy()
-        data["image"] = data["image"].to(self.device)
+        self._move_batch_to_device(data)
         assert len(self.eval_dataset.cameras.shape) == 1, "Assumes single batch dimension"
         camera = self.eval_dataset.cameras[image_idx : image_idx + 1].to(self.device)
         return camera, data
+
+    def _get_cached_data(self, split: Literal["train", "eval"], idx: int) -> Dict[str, torch.Tensor]:
+        if self.config.cache_images != "lazy":
+            return self.cached_train[idx] if split == "train" else self.cached_eval[idx]
+
+        cache = self._lazy_train_cache if split == "train" else self._lazy_eval_cache
+        if idx in cache:
+            return cache[idx]
+
+        dataset = self.train_dataset if split == "train" else self.eval_dataset
+        data = self._load_and_process_image(dataset, idx)
+
+        depth_filenames = self.train_depth_filenames if split == "train" else self.eval_depth_filenames
+        confidence_filenames = self.train_confidence_filenames if split == "train" else self.eval_confidence_filenames
+        depth_unit_scale = self.train_depth_unit_scale if split == "train" else self.eval_depth_unit_scale
+        depth_scale = self.train_depth_scale if split == "train" else self.eval_depth_scale
+
+        def resolve_depth_target_size(
+            source_h: int, source_w: int, image_h: int, image_w: int
+        ) -> Tuple[int, int]:
+            mode = self.config.depth_resize_mode
+            if mode == "image":
+                return image_h, image_w
+            if mode == "native":
+                return source_h, source_w
+            if mode == "max_edge":
+                max_edge = max(1, int(self.config.depth_max_edge))
+                max_source = max(source_h, source_w)
+                if max_source <= max_edge:
+                    return source_h, source_w
+                scale = max_edge / float(max_source)
+                target_h = max(1, int(round(source_h * scale)))
+                target_w = max(1, int(round(source_w * scale)))
+                return target_h, target_w
+            assert_never(mode)
+
+        self._attach_depth_confidence(
+            idx=idx,
+            cache=data,
+            depth_filenames=depth_filenames,
+            confidence_filenames=confidence_filenames,
+            depth_unit_scale=depth_unit_scale,
+            depth_scale=depth_scale,
+            resolve_depth_target_size=resolve_depth_target_size,
+        )
+
+        self._prepare_cache_for_device(data, "cpu")
+        cache[idx] = data
+        return data
+
+    def _move_batch_to_device(self, batch: Dict[str, torch.Tensor]) -> None:
+        for key in ("image", "mask", "depth", "confidence"):
+            if key in batch and isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(self.device, non_blocking=self.config.non_blocking_transfers)
+
+    def _prefetch_next_train(self) -> None:
+        if self._prefetch_stream is None:
+            return
+        if len(self.train_unseen_cameras) == 0:
+            self.train_unseen_cameras = self.sample_train_cameras()
+        next_idx = self.train_unseen_cameras[0]
+        if self._prefetch_train_idx == next_idx:
+            return
+
+        data = self._get_cached_data("train", next_idx).copy()
+        assert len(self.train_cameras.shape) == 1, "Assumes single batch dimension"
+        camera = self.train_cameras[next_idx : next_idx + 1]
+
+        with torch.cuda.stream(self._prefetch_stream):
+            self._move_batch_to_device(data)
+            camera = camera.to(self.device)
+
+        if camera.metadata is None:
+            camera.metadata = {}
+        camera.metadata["cam_idx"] = next_idx
+        self._prefetch_train = (camera, data)
+        self._prefetch_train_idx = next_idx
+
+    def _load_and_process_image(self, dataset: InputDataset, idx: int) -> Dict[str, torch.Tensor]:
+        data = dataset.get_data(idx, image_type=self.config.cache_images_type)
+        camera = dataset.cameras[idx].reshape(())
+        assert data["image"].shape[1] == camera.width.item() and data["image"].shape[0] == camera.height.item(), (
+            f'The size of image ({data["image"].shape[1]}, {data["image"].shape[0]}) loaded '
+            f'does not match the camera parameters ({camera.width.item(), camera.height.item()})'
+        )
+        if camera.distortion_params is None or torch.all(camera.distortion_params == 0):
+            return data
+        K = camera.get_intrinsics_matrices().numpy()
+        distortion_params = camera.distortion_params.numpy()
+        image = data["image"].numpy()
+
+        K, image, mask = _undistort_image(camera, distortion_params, data, image, K)
+        data["image"] = torch.from_numpy(image)
+        if mask is not None:
+            data["mask"] = mask
+
+        dataset.cameras.fx[idx] = float(K[0, 0])
+        dataset.cameras.fy[idx] = float(K[1, 1])
+        dataset.cameras.cx[idx] = float(K[0, 2])
+        dataset.cameras.cy[idx] = float(K[1, 2])
+        dataset.cameras.width[idx] = image.shape[1]
+        dataset.cameras.height[idx] = image.shape[0]
+        return data
+
+    def _attach_depth_confidence(
+        self,
+        idx: int,
+        cache: Dict[str, torch.Tensor],
+        depth_filenames: Optional[List[Path]],
+        confidence_filenames: Optional[List[Path]],
+        depth_unit_scale: float,
+        depth_scale: float,
+        resolve_depth_target_size,
+    ) -> None:
+        if depth_filenames and idx < len(depth_filenames):
+            depth_path = depth_filenames[idx]
+            if depth_path and Path(depth_path).exists():
+                depth_raw = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
+                if depth_raw is not None:
+                    depth = depth_raw.astype(np.float32) * float(depth_unit_scale)
+                    image_h, image_w = cache["image"].shape[0], cache["image"].shape[1]
+                    target_h, target_w = resolve_depth_target_size(depth.shape[0], depth.shape[1], image_h, image_w)
+                    if depth.shape[0] != target_h or depth.shape[1] != target_w:
+                        depth = cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+                    if self.config.depth_dtype == "float16":
+                        depth = depth.astype(np.float16)
+                    cache["depth"] = torch.from_numpy(depth)[..., None]
+                    cache["depth_scale"] = float(depth_scale)
+
+        if confidence_filenames and idx < len(confidence_filenames):
+            confidence_path = confidence_filenames[idx]
+            if confidence_path and Path(confidence_path).exists():
+                confidence_raw = cv2.imread(str(confidence_path), cv2.IMREAD_UNCHANGED)
+                if confidence_raw is not None:
+                    if self.config.confidence_dtype == "uint8":
+                        confidence = confidence_raw.astype(np.uint8)
+                    elif self.config.confidence_dtype == "float16":
+                        confidence = confidence_raw.astype(np.float16)
+                    else:
+                        confidence = confidence_raw.astype(np.float32)
+                    image_h, image_w = cache["image"].shape[0], cache["image"].shape[1]
+                    target_h, target_w = resolve_depth_target_size(
+                        confidence.shape[0], confidence.shape[1], image_h, image_w
+                    )
+                    if confidence.shape[0] != target_h or confidence.shape[1] != target_w:
+                        confidence = cv2.resize(confidence, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+                    cache["confidence"] = torch.from_numpy(confidence)[..., None]
+
+    def _prepare_cache_for_device(
+        self, cache: Dict[str, torch.Tensor], cache_images_device: Literal["cpu", "gpu"]
+    ) -> None:
+        if cache_images_device == "gpu":
+            cache["image"] = cache["image"].to(self.device, non_blocking=self.config.non_blocking_transfers)
+            if "mask" in cache:
+                cache["mask"] = cache["mask"].to(self.device, non_blocking=self.config.non_blocking_transfers)
+            if "depth" in cache:
+                cache["depth"] = cache["depth"].to(self.device, non_blocking=self.config.non_blocking_transfers)
+            if "confidence" in cache:
+                cache["confidence"] = cache["confidence"].to(self.device, non_blocking=self.config.non_blocking_transfers)
+            return
+        if cache_images_device == "cpu":
+            cache["image"] = cache["image"].pin_memory()
+            if "mask" in cache:
+                cache["mask"] = cache["mask"].pin_memory()
+            if "depth" in cache:
+                cache["depth"] = cache["depth"].pin_memory()
+            if "confidence" in cache:
+                cache["confidence"] = cache["confidence"].pin_memory()
+            return
+        assert_never(cache_images_device)
 
 
 def _undistort_image(

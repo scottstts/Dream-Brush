@@ -233,6 +233,10 @@ class SplatfactoModelConfig(ModelConfig):
     """Shape of the bilateral grid (X, Y, W)"""
     color_corrected_metrics: bool = False
     """If True, apply color correction to the rendered images before computing the metrics."""
+    use_tf32: bool = True
+    """If True, enable TF32 for faster matmul/conv on supported GPUs."""
+    camera_optimizer_device: Literal["cpu", "cuda", "auto"] = "auto"
+    """Device for camera optimizer parameters."""
 
 
 class SplatfactoModel(Model):
@@ -254,6 +258,14 @@ class SplatfactoModel(Model):
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
+        if self.config.use_tf32 and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
+
         if self.seed_points is not None and not self.config.random_init:
             means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
         else:
@@ -298,9 +310,18 @@ class SplatfactoModel(Model):
             }
         )
 
-        self.camera_optimizer: CameraOptimizer = self.config.camera_optimizer.setup(
-            num_cameras=self.num_train_data, device="cpu"
-        )
+        optimizer_device = self.config.camera_optimizer_device
+        if optimizer_device == "auto":
+            optimizer_device = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            self.camera_optimizer = self.config.camera_optimizer.setup(
+                num_cameras=self.num_train_data, device=optimizer_device
+            )
+        except Exception as exc:
+            CONSOLE.print(
+                f"[yellow]Camera optimizer init failed on device '{optimizer_device}': {exc}. Falling back to CPU."
+            )
+            self.camera_optimizer = self.config.camera_optimizer.setup(num_cameras=self.num_train_data, device="cpu")
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -591,7 +612,7 @@ class SplatfactoModel(Model):
         camera_scale_fac = self._get_downscale_factor()
         camera.rescale_output_resolution(1 / camera_scale_fac)
         viewmat = get_viewmat(optimized_camera_to_world)
-        K = camera.get_intrinsics_matrices().cuda()
+        K = camera.get_intrinsics_matrices().to(self.device)
         W, H = int(camera.width.item()), int(camera.height.item())
         self.last_size = (H, W)
         camera.rescale_output_resolution(camera_scale_fac)  # type: ignore
@@ -694,8 +715,6 @@ class SplatfactoModel(Model):
             depth = depth[..., None]
         if "depth_scale" in batch and batch["depth_scale"] is not None:
             depth = depth * batch["depth_scale"]
-
-        depth = self._downscale_if_required(depth)
         mask = (depth > self.config.depth_min) & (depth < self.config.depth_max)
 
         if "confidence" in batch and batch["confidence"] is not None and self.config.depth_confidence_min > 0:
@@ -705,10 +724,39 @@ class SplatfactoModel(Model):
             confidence = confidence.to(self.device)
             if confidence.ndim == 2:
                 confidence = confidence[..., None]
-            confidence = self._downscale_if_required(confidence)
             mask = mask & (confidence >= self.config.depth_confidence_min)
 
         return depth, mask
+
+    def _resize_depth_tensor(self, tensor: torch.Tensor, target_hw: Tuple[int, int], mode: str) -> torch.Tensor:
+        if tensor.shape[0] == target_hw[0] and tensor.shape[1] == target_hw[1]:
+            return tensor
+        tensor_nchw = tensor.permute(2, 0, 1).unsqueeze(0)
+        if mode in ("bilinear", "bicubic"):
+            resized = F.interpolate(tensor_nchw, size=target_hw, mode=mode, align_corners=False)
+        else:
+            resized = F.interpolate(tensor_nchw, size=target_hw, mode=mode)
+        return resized.squeeze(0).permute(1, 2, 0)
+
+    def _align_depth_targets(
+        self,
+        gt_depth: torch.Tensor,
+        depth_mask: torch.Tensor,
+        pred_depth: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        gt_h, gt_w = gt_depth.shape[:2]
+        pred_h, pred_w = pred_depth.shape[:2]
+        if gt_h == pred_h and gt_w == pred_w:
+            return gt_depth, depth_mask, pred_depth
+
+        gt_pixels = gt_h * gt_w
+        pred_pixels = pred_h * pred_w
+        if gt_pixels >= pred_pixels:
+            gt_depth = self._resize_depth_tensor(gt_depth, (pred_h, pred_w), mode="area")
+            depth_mask = self._resize_depth_tensor(depth_mask.float(), (pred_h, pred_w), mode="nearest") > 0.5
+        else:
+            pred_depth = self._resize_depth_tensor(pred_depth, (gt_h, gt_w), mode="area")
+        return gt_depth, depth_mask, pred_depth
 
     def composite_with_background(self, image, background) -> torch.Tensor:
         """Composite the ground truth image with a background color when it has an alpha channel.
@@ -793,6 +841,9 @@ class SplatfactoModel(Model):
                 if pred_depth is not None:
                     if pred_depth.ndim == 2:
                         pred_depth = pred_depth[..., None]
+                    gt_depth, depth_mask, pred_depth = self._align_depth_targets(
+                        gt_depth, depth_mask, pred_depth
+                    )
                     if depth_mask.shape != pred_depth.shape:
                         depth_mask = depth_mask.expand_as(pred_depth)
                     valid = depth_mask & torch.isfinite(pred_depth) & torch.isfinite(gt_depth)
