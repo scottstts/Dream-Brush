@@ -13,6 +13,7 @@ import simd
 struct ViewerSessionView: View {
     let asset: SplatAsset
     let bundle: CaptureBundle
+    let relocalizationEnabled: Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var sessionManager = ViewerSessionManager()
@@ -212,6 +213,19 @@ struct ViewerSessionView: View {
             .padding()
             .background(.ultraThinMaterial)
             .cornerRadius(16)
+        } else if !sessionManager.relocalizationEnabled {
+            VStack(spacing: 8) {
+                Label("Relocalization off", systemImage: "location.slash")
+                    .font(.headline)
+                    .foregroundStyle(.yellow)
+
+                Text("Rendering without alignment")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .padding()
+            .background(.ultraThinMaterial)
+            .cornerRadius(16)
         } else if sessionManager.mismatchDetected {
             VStack(spacing: 12) {
                 Label("Not relocalized", systemImage: "xmark.octagon.fill")
@@ -252,6 +266,9 @@ struct ViewerSessionView: View {
     }
 
     private var relocalizationStatus: (title: String, color: Color) {
+        if !sessionManager.relocalizationEnabled {
+            return ("Off", .gray)
+        }
         if sessionManager.shouldRender {
             return ("Aligned", .green)
         }
@@ -352,7 +369,8 @@ struct ViewerSessionView: View {
         do {
             try sessionManager.startSession(
                 for: bundle,
-                modelToCapture: modelToCaptureTransform()
+                modelToCapture: modelToCaptureTransform(),
+                relocalizationEnabled: relocalizationEnabled
             )
         } catch {
             errorMessage = error.localizedDescription

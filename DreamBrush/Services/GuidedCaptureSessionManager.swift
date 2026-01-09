@@ -61,6 +61,10 @@ final class GuidedCaptureSessionManager: NSObject {
     private var captureStartTimestamp: TimeInterval?
     private var currentFrame: ARFrame?
 
+    private var rootAnchorSet = false
+    private var rootAnchor: ARAnchor?
+    private var rootAnchorTransform: simd_float4x4?
+
     private var anchorYawDegrees: Float?
     private var lastCaptureYawDegrees: Float?
     private var lastSampleYawDegrees: Float?
@@ -161,7 +165,6 @@ final class GuidedCaptureSessionManager: NSObject {
         currentBundle = bundle
         isCapturing = true
         isCaptureComplete = false
-        writeCaptureOriginAnchor(to: bundle, from: frame)
         updateAlignment(for: frame)
         return bundle
     }
@@ -195,6 +198,15 @@ final class GuidedCaptureSessionManager: NSObject {
             currentBundle = bundle
         } catch {
             logger.error("Failed to update manifest: \(error.localizedDescription)")
+        }
+
+        if !rootAnchorSet, let frame = currentFrame, let session {
+            setRootAnchorIfReady(frame: frame, session: session)
+        }
+
+        if let anchorInfo = buildRootAnchorInfo() {
+            let anchors = AnchorData(rootAnchor: anchorInfo)
+            try? CaptureBundleManager.shared.writeAnchors(anchors, to: bundle.bundleURL)
         }
 
         session?.getCurrentWorldMap { [weak self] worldMap, error in
@@ -398,6 +410,9 @@ final class GuidedCaptureSessionManager: NSObject {
         stableExposureCount = 0
         lastAngularVelocity = 0
         lastUprightDeviation = 0
+        rootAnchorSet = false
+        rootAnchor = nil
+        rootAnchorTransform = nil
     }
 
     // MARK: - Utilities
@@ -717,14 +732,14 @@ final class GuidedCaptureSessionManager: NSObject {
         )
     }
 
-    private func writeCaptureOriginAnchor(to bundle: CaptureBundle, from frame: ARFrame) {
-        let anchorInfo = AnchorInfo(
+    private func buildRootAnchorInfo() -> AnchorInfo? {
+        guard let transform = rootAnchorTransform else { return nil }
+        return AnchorInfo(
+            id: rootAnchor?.identifier.uuidString ?? UUID().uuidString,
             name: "CaptureOrigin",
-            transform: matrixToRowMajorArray(frame.camera.transform),
-            trackingState: frame.camera.trackingState.description
+            transform: matrixToRowMajorArray(transform),
+            trackingState: trackingState.description
         )
-        let anchors = AnchorData(rootAnchor: anchorInfo)
-        try? CaptureBundleManager.shared.writeAnchors(anchors, to: bundle.bundleURL)
     }
 
     private func uprightDeviationDegrees(from camera: ARCamera, orientation: UIInterfaceOrientation) -> Float {
@@ -790,12 +805,28 @@ final class GuidedCaptureSessionManager: NSObject {
         }
         return .portrait
     }
+
+    private func setRootAnchorIfReady(frame: ARFrame, session: ARSession) {
+        guard !rootAnchorSet else { return }
+        guard trackingState == .normal else { return }
+        guard worldMappingStatus == .extending || worldMappingStatus == .mapped else { return }
+
+        let cameraPose = frame.camera.transform
+        let anchor = ARAnchor(name: "CaptureOrigin", transform: cameraPose)
+        session.add(anchor: anchor)
+        rootAnchor = anchor
+        rootAnchorTransform = cameraPose
+        rootAnchorSet = true
+    }
 }
 
 extension GuidedCaptureSessionManager: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         currentFrame = frame
         if isCapturing {
+            trackingState = frame.camera.trackingState
+            worldMappingStatus = frame.worldMappingStatus
+            setRootAnchorIfReady(frame: frame, session: session)
             updateAlignment(for: frame)
         } else {
             trackingState = frame.camera.trackingState

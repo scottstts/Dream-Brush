@@ -10,10 +10,15 @@ import SwiftUI
 struct ViewerView: View {
     @State private var splatAssets: [SplatAsset] = []
     @State private var captureBundles: [CaptureBundle] = []
+    @AppStorage("viewerRelocalizationEnabled") private var relocalizationEnabled = true
 
     var body: some View {
         NavigationStack {
             List {
+                Section("Viewer Settings") {
+                    Toggle("Relocalization", isOn: $relocalizationEnabled)
+                }
+
                 if splatAssets.isEmpty {
                     viewerEmptyState
                 } else {
@@ -21,7 +26,11 @@ struct ViewerView: View {
                         Section("Ready to View") {
                             ForEach(linkedAssets, id: \.0.id) { asset, bundle in
                                 NavigationLink {
-                                    ViewerSessionView(asset: asset, bundle: bundle)
+                                    ViewerSessionView(
+                                        asset: asset,
+                                        bundle: bundle,
+                                        relocalizationEnabled: relocalizationEnabled
+                                    )
                                 } label: {
                                     SplatAssetRow(asset: asset)
                                 }

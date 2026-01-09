@@ -22,6 +22,7 @@ We **do not** implement this in the iOS app. This is an offline Python pipeline 
 
 ## Inputs
 From a CaptureBundle (exported from iOS):
+**Found in export_bundle_samples/ dir**
 
 ```
 CaptureBundle_<id>/
@@ -175,6 +176,7 @@ Ensure the merged PLY renders correctly in the app viewer.
 ## Suggested directory layout (inside `3dgs/`)
 ```
 3dgs/
+  sharp_model.pt
   scripts/
     run_sharp.py
     merge_splats.py

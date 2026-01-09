@@ -31,9 +31,13 @@ final class ViewerSessionManager: NSObject {
     var alignmentTransform: simd_float4x4?
     var anchorPositionError: Float?
     var anchorAngleError: Float?
+    var relocalizationEnabled = true
 
     var shouldRender: Bool {
-        isRelocalized && !mismatchDetected
+        if !relocalizationEnabled {
+            return trackingState == .normal
+        }
+        return isRelocalized && !mismatchDetected
     }
 
     var config = ViewerConfig()
@@ -53,14 +57,27 @@ final class ViewerSessionManager: NSObject {
     private var lastPoseJumpDistance: Float?
     private var anchorFound = false
 
-    func startSession(for bundle: CaptureBundle, modelToCapture: simd_float4x4?) throws {
-        let worldMap = try CaptureBundleManager.shared.loadWorldMap(from: bundle.bundleURL)
-        let anchors = try CaptureBundleManager.shared.loadAnchors(from: bundle.bundleURL)
+    func startSession(for bundle: CaptureBundle, modelToCapture: simd_float4x4?, relocalizationEnabled: Bool) throws {
+        self.relocalizationEnabled = relocalizationEnabled
+        let worldMap: ARWorldMap?
+        let anchors: AnchorData?
+        if relocalizationEnabled {
+            worldMap = try CaptureBundleManager.shared.loadWorldMap(from: bundle.bundleURL)
+            anchors = try CaptureBundleManager.shared.loadAnchors(from: bundle.bundleURL)
+        } else {
+            worldMap = nil
+            anchors = nil
+        }
 
         loadedBundle = bundle
-        expectedAnchorName = anchors.rootAnchor.name
-        let matrixLayout = bundle.manifest.coordinateConventions.matrixLayout
-        captureAnchorTransform = Self.matrix(from: anchors.rootAnchor.transform, layout: matrixLayout)
+        if let anchors {
+            expectedAnchorName = anchors.rootAnchor.name
+            let matrixLayout = bundle.manifest.coordinateConventions.matrixLayout
+            captureAnchorTransform = Self.matrix(from: anchors.rootAnchor.transform, layout: matrixLayout)
+        } else {
+            expectedAnchorName = "CaptureOrigin"
+            captureAnchorTransform = nil
+        }
         modelToCaptureTransform = modelToCapture ?? matrix_identity_float4x4
 
         resetState()
@@ -78,7 +95,7 @@ final class ViewerSessionManager: NSObject {
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         isSessionRunning = true
         relocalizationStartDate = Date()
-        relocalizationMessage = "Searching for original location..."
+        relocalizationMessage = relocalizationEnabled ? "Searching for original location..." : "Relocalization off"
         logger.info("Viewer session started for bundle: \(bundle.manifest.bundleId)")
     }
 
@@ -90,7 +107,11 @@ final class ViewerSessionManager: NSObject {
     func retryRelocalization() {
         guard let bundle = loadedBundle else { return }
         do {
-            try startSession(for: bundle, modelToCapture: modelToCaptureTransform)
+            try startSession(
+                for: bundle,
+                modelToCapture: modelToCaptureTransform,
+                relocalizationEnabled: true
+            )
         } catch {
             mismatchDetected = true
             mismatchReason = error.localizedDescription
@@ -175,6 +196,13 @@ private extension ViewerSessionManager {
     }
 
     func updateRelocalizationState() {
+        if !relocalizationEnabled {
+            isRelocalized = trackingState == .normal
+            mismatchDetected = false
+            mismatchReason = nil
+            return
+        }
+
         let hasGoodTracking = trackingState == .normal
         isRelocalized = hasGoodTracking && anchorFound
 
@@ -195,6 +223,7 @@ private extension ViewerSessionManager {
     }
 
     func updateAnchorTransforms(from anchors: [ARAnchor]) {
+        guard relocalizationEnabled else { return }
         guard let anchor = anchors.first(where: { $0.name == expectedAnchorName }) else { return }
         anchorFound = true
         currentAnchorTransform = anchor.transform
@@ -238,6 +267,11 @@ private extension ViewerSessionManager {
     }
 
     func updateAlignmentTransform() {
+        if !relocalizationEnabled {
+            alignmentTransform = modelToCaptureTransform
+            return
+        }
+
         guard let currentAnchorTransform else {
             alignmentTransform = nil
             return
@@ -246,6 +280,10 @@ private extension ViewerSessionManager {
     }
 
     func updateRelocalizationMessage() {
+        if !relocalizationEnabled {
+            relocalizationMessage = "Relocalization off"
+            return
+        }
         if mismatchDetected {
             relocalizationMessage = mismatchReason ?? "Relocalization mismatch detected"
             return
