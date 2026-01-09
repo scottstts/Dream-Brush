@@ -16,54 +16,101 @@ struct LibraryView: View {
     @State private var selectedSplatAsset: SplatAsset?
     @State private var showingImportPicker = false
     @State private var libraryErrorMessage: String?
+    @State private var isBundlesSectionExpanded = true
+    @State private var isSplatAssetsSectionExpanded = true
     @Environment(\.editMode) private var editMode
 
     var body: some View {
         NavigationStack {
             List(selection: $selectedBundleIds) {
-                Section("Capture Bundles") {
-                    if capturedBundles.isEmpty {
-                        ContentUnavailableView(
-                            "No Captures",
-                            systemImage: "camera.viewfinder",
-                            description: Text("Captured scans will appear here")
-                        )
-                        .listRowBackground(Color.clear)
-                    } else {
-                        ForEach(capturedBundles) { bundle in
-                            CaptureBundleRow(bundle: bundle)
-                                .contentShape(Rectangle())
-                                .tag(bundle.id)
-                                .onTapGesture {
-                                    guard editMode?.wrappedValue.isEditing != true else { return }
-                                    selectedBundle = bundle
-                                }
+                // Capture Bundles Section
+                Section {
+                    if isBundlesSectionExpanded {
+                        if capturedBundles.isEmpty {
+                            LibraryEmptyState(
+                                icon: "camera.viewfinder",
+                                title: "No Captures",
+                                description: "Captured scans will appear here"
+                            )
+                        } else {
+                            ForEach(capturedBundles) { bundle in
+                                CaptureBundleRow(bundle: bundle)
+                                    .contentShape(Rectangle())
+                                    .tag(bundle.id)
+                                    .onTapGesture {
+                                        guard editMode?.wrappedValue.isEditing != true else { return }
+                                        selectedBundle = bundle
+                                    }
+                            }
+                            .onDelete(perform: deleteBundles)
                         }
-                        .onDelete(perform: deleteBundles)
                     }
+                } header: {
+                    Button {
+                        withAnimation {
+                            isBundlesSectionExpanded.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Label("Capture Bundles", systemImage: "photo.stack")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .rotationEffect(.degrees(isBundlesSectionExpanded ? 90 : 0))
+                        }
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+                        .textCase(nil)
+                    }
+                    .buttonStyle(.plain)
                 }
 
-                Section("Splat Assets") {
-                    if splatAssets.isEmpty {
-                        ContentUnavailableView(
-                            "No Splat Assets",
-                            systemImage: "cube.transparent",
-                            description: Text("Import trained 3DGS assets to view in AR")
-                        )
-                        .listRowBackground(Color.clear)
-                    } else {
-                        ForEach(splatAssets) { asset in
-                            SplatAssetRow(asset: asset)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedSplatAsset = asset
-                                }
+                // Splat Assets Section
+                Section {
+                    if isSplatAssetsSectionExpanded {
+                        if splatAssets.isEmpty {
+                            LibraryEmptyState(
+                                icon: "cube.transparent",
+                                title: "No Splat Assets",
+                                description: "Import trained 3DGS assets to view in AR"
+                            )
+                        } else {
+                            ForEach(splatAssets) { asset in
+                                SplatAssetRow(asset: asset)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedSplatAsset = asset
+                                    }
+                            }
+                            .onDelete(perform: deleteSplatAssets)
+                            .selectionDisabled(true)
                         }
-                        .onDelete(perform: deleteSplatAssets)
-                        .selectionDisabled(true)
                     }
+                } header: {
+                    Button {
+                        withAnimation {
+                            isSplatAssetsSectionExpanded.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Label("Splat Assets", systemImage: "cube.transparent")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .rotationEffect(.degrees(isSplatAssetsSectionExpanded ? 90 : 0))
+                        }
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+                        .textCase(nil)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle("Library")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -353,7 +400,6 @@ struct SplatAssetDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var currentAsset: SplatAsset
     @State private var selectedBundleId: String?
-    @State private var loadTestState: LoadTestState = .idle
     @State private var updateErrorMessage: String?
 
     init(asset: SplatAsset, bundles: [CaptureBundle], onUpdate: @escaping () -> Void) {
@@ -394,16 +440,6 @@ struct SplatAssetDetailView: View {
                         .pickerStyle(.menu)
                     }
                 }
-
-                Section("Load Test") {
-                    Button {
-                        runLoadTest()
-                    } label: {
-                        Label("Run Load Test", systemImage: "checkmark.seal")
-                    }
-
-                    loadTestStatusView
-                }
             }
             .navigationTitle("Splat Asset")
             .toolbar {
@@ -425,31 +461,6 @@ struct SplatAssetDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private var loadTestStatusView: some View {
-        switch loadTestState {
-        case .idle:
-            Text("Validate that the PLY header parses correctly.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .running:
-            HStack {
-                ProgressView()
-                Text("Testing...")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .success(let message):
-            Label(message, systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-        case .failure(let message):
-            Label(message, systemImage: "xmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
-        }
-    }
-
     private func updateAssociation(to bundleId: String?) {
         let updated = currentAsset.updatingAssociation(bundleId)
 
@@ -467,37 +478,6 @@ struct SplatAssetDetailView: View {
             }
         }
     }
-
-    private func runLoadTest() {
-        loadTestState = .running
-
-        Task {
-            let result = SplatAssetManager.shared.validateAsset(currentAsset)
-
-            if result.success {
-                loadTestState = .success(result.details)
-                if result.gaussianCount != nil, result.gaussianCount != currentAsset.gaussianCount {
-                    let updated = currentAsset.updatingGaussianCount(result.gaussianCount)
-                    do {
-                        try SplatAssetManager.shared.updateAsset(updated)
-                        currentAsset = updated
-                        onUpdate()
-                    } catch {
-                        updateErrorMessage = error.localizedDescription
-                    }
-                }
-            } else {
-                loadTestState = .failure(result.details)
-            }
-        }
-    }
-
-    private enum LoadTestState {
-        case idle
-        case running
-        case success(String)
-        case failure(String)
-    }
 }
 
 // MARK: - Bundle Detail View
@@ -506,16 +486,13 @@ struct BundleDetailView: View {
     let bundle: CaptureBundle
     let onDismiss: () -> Void
 
-    @State private var sessionManager = CaptureSessionManager()
-    @State private var isTestingRelocalization = false
-    @State private var testResult: RelocalizationTestResult?
-    @State private var showingTestView = false
     @State private var isPreparingExport = false
     @State private var exportURL: URL?
     @State private var showingExportPicker = false
     @State private var showingShareSheet = false
     @State private var showingExportError = false
     @State private var exportErrorMessage = ""
+    @State private var bundleSize: Int64 = 0
 
     private var hasWorldMap: Bool {
         CaptureBundleManager.shared.hasWorldMap(at: bundle.bundleURL)
@@ -533,16 +510,28 @@ struct BundleDetailView: View {
                 Section("Capture Info") {
                     LabeledContent("Bundle ID", value: String(bundle.manifest.bundleId.prefix(8)) + "...")
                     LabeledContent("Created", value: bundle.manifest.createdAt.formatted())
-                    LabeledContent("Duration", value: formatDuration(bundle.manifest.captureStats.durationSeconds))
-                    LabeledContent("Device", value: bundle.manifest.deviceModel)
                 }
 
                 // Frame Statistics Section
                 Section("Frame Statistics") {
                     LabeledContent("Total Frames", value: "\(bundle.manifest.captureStats.frameCount)")
-                    LabeledContent("Keyframes", value: "\(bundle.manifest.captureStats.keyframeCount)")
                     LabeledContent("Depth Frames", value: "\(bundle.manifest.captureStats.depthFrameCount)")
-                    LabeledContent("Storage Size", value: formatBytes(bundle.manifest.captureStats.estimatedSizeBytes))
+                    LabeledContent("Storage Size", value: formatBytes(bundleSize))
+                }
+
+                // World Map Section
+                Section("World Map") {
+                    HStack {
+                        Text("Status")
+                        Spacer()
+                        if hasWorldMap {
+                            Label("Saved", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        } else {
+                            Label("Not Available", systemImage: "xmark.circle")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 // Export Section
@@ -573,71 +562,6 @@ struct BundleDetailView: View {
                 } footer: {
                     Text("Exports the full capture bundle folder for offline training.")
                 }
-
-                // Relocalization Quality Section
-                Section("Relocalization Quality") {
-                    if let quality = bundle.manifest.relocalizationQuality {
-                        RelocalizationQualityView(quality: quality)
-                    } else {
-                        Text("No relocalization data available")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    // World map status
-                    HStack {
-                        Text("World Map")
-                        Spacer()
-                        if hasWorldMap {
-                            Label("Saved", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                        } else {
-                            Label("Not Available", systemImage: "xmark.circle")
-                                .foregroundStyle(.red)
-                        }
-                    }
-
-                    // Last test result
-                    if let result = bundle.manifest.relocalizationQuality?.lastRelocalizationTestResult {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Last Test")
-                                Spacer()
-                                if result.success {
-                                    Label("Passed", systemImage: "checkmark.circle.fill")
-                                        .foregroundStyle(.green)
-                                } else {
-                                    Label("Failed", systemImage: "xmark.circle.fill")
-                                        .foregroundStyle(.red)
-                                }
-                            }
-                            if let time = result.timeToRelocalize {
-                                Text("Relocalized in \(String(format: "%.1f", time))s")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let notes = result.notes {
-                                Text(notes)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                // Test Relocalization Section
-                if hasWorldMap {
-                    Section {
-                        Button(action: { showingTestView = true }) {
-                            HStack {
-                                Image(systemName: "location.viewfinder")
-                                Text("Test Relocalization")
-                            }
-                        }
-                        .disabled(isTestingRelocalization)
-                    } footer: {
-                        Text("Walk back to the scanned area and test if the app can relocalize to the saved world map.")
-                    }
-                }
             }
             .navigationTitle("Bundle Details")
             .navigationBarTitleDisplayMode(.inline)
@@ -648,13 +572,8 @@ struct BundleDetailView: View {
                     }
                 }
             }
-            .fullScreenCover(isPresented: $showingTestView) {
-                RelocalizationTestView(bundle: bundle, onComplete: { result in
-                    testResult = result
-                    showingTestView = false
-                    // Reload the bundle to get updated test result
-                    onDismiss()
-                })
+            .task {
+                bundleSize = await CaptureBundleManager.shared.calculateDirectorySizeAsync(at: bundle.bundleURL)
             }
             .sheet(isPresented: $showingExportPicker) {
                 if let exportURL {
@@ -676,12 +595,6 @@ struct BundleDetailView: View {
                 Text(exportErrorMessage)
             }
         }
-    }
-
-    private func formatDuration(_ seconds: Double) -> String {
-        let minutes = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return "\(minutes)m \(secs)s"
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -720,250 +633,31 @@ struct BundleDetailView: View {
     }
 }
 
-// MARK: - Relocalization Quality View
+// MARK: - Library Empty State
 
-struct RelocalizationQualityView: View {
-    let quality: RelocalizationQuality
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Overall quality score
-            HStack {
-                Text("Overall Quality")
-                Spacer()
-                Text(quality.qualityAssessment)
-                    .foregroundStyle(qualityColor)
-                    .fontWeight(.medium)
-            }
-
-            // Quality metrics
-            QualityMetricRow(
-                label: "Good Tracking",
-                value: "\(Int(quality.goodTrackingPercentage * 100))%",
-                icon: "location.fill",
-                isGood: quality.goodTrackingPercentage > 0.7
-            )
-
-            QualityMetricRow(
-                label: "Mapping Status",
-                value: quality.mappingStatusReached ? "Reached" : "Not Reached",
-                icon: "map.fill",
-                isGood: quality.mappingStatusReached
-            )
-
-            QualityMetricRow(
-                label: "Depth Confidence",
-                value: "\(Int(quality.averageDepthConfidence * 100))%",
-                icon: "cube.fill",
-                isGood: quality.averageDepthConfidence > 0.5
-            )
-
-            QualityMetricRow(
-                label: "World Map",
-                value: quality.worldMapSaved ? "Saved" : "Not Saved",
-                icon: "globe.americas.fill",
-                isGood: quality.worldMapSaved
-            )
-        }
-    }
-
-    private var qualityColor: Color {
-        switch quality.qualityAssessment {
-        case "Excellent": return .green
-        case "Good": return .blue
-        case "Fair": return .orange
-        default: return .red
-        }
-    }
-}
-
-struct QualityMetricRow: View {
-    let label: String
-    let value: String
+private struct LibraryEmptyState: View {
     let icon: String
-    let isGood: Bool
+    let title: String
+    let description: String
 
     var body: some View {
-        HStack {
+        VStack(spacing: 12) {
             Image(systemName: icon)
-                .foregroundStyle(isGood ? .green : .orange)
-                .frame(width: 20)
-            Text(label)
-                .font(.caption)
-            Spacer()
-            Text(value)
-                .font(.caption)
-                .foregroundStyle(isGood ? .primary : .secondary)
+                .font(.system(size: 40))
+                .foregroundStyle(.tertiary)
+
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.secondary)
+
+            Text(description)
+                .font(.subheadline)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
         }
-    }
-}
-
-// MARK: - Relocalization Test View
-
-struct RelocalizationTestView: View {
-    let bundle: CaptureBundle
-    let onComplete: (RelocalizationTestResult?) -> Void
-
-    @State private var sessionManager = CaptureSessionManager()
-    @State private var testStarted = false
-    @State private var testComplete = false
-    @State private var result: RelocalizationTestResult?
-
-    var body: some View {
-        ZStack {
-            // AR Camera Preview
-            ARViewContainer(
-                session: sessionManager.session ?? ARSession(),
-                showCoverageOverlay: false,
-                isRecording: false
-            )
-                .ignoresSafeArea()
-
-            // Overlay
-            VStack {
-                // Top status
-                VStack(spacing: 8) {
-                    Text(sessionManager.relocalizationTestStatus.isEmpty ? "Preparing..." : sessionManager.relocalizationTestStatus)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-
-                    // Tracking status
-                    HStack(spacing: 16) {
-                        StatusPill(
-                            title: "Tracking",
-                            value: sessionManager.trackingState.displayName,
-                            color: sessionManager.trackingState.color
-                        )
-                        StatusPill(
-                            title: "Mapping",
-                            value: sessionManager.worldMappingStatus.displayName,
-                            color: sessionManager.worldMappingStatus.color
-                        )
-                    }
-                }
-                .padding()
-                .background(.ultraThinMaterial)
-                .cornerRadius(16)
-                .padding()
-
-                Spacer()
-
-                // Instructions
-                VStack(spacing: 16) {
-                    if !testStarted {
-                        Text("Move to the area where you captured the scan")
-                            .font(.body)
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.white)
-
-                        Button("Start Test") {
-                            startTest()
-                        }
-                        .buttonStyle(.borderedProminent)
-                    } else if testComplete {
-                        if let result = result {
-                            VStack(spacing: 8) {
-                                Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .font(.system(size: 60))
-                                    .foregroundStyle(result.success ? .green : .red)
-
-                                Text(result.success ? "Relocalization Successful!" : "Relocalization Failed")
-                                    .font(.headline)
-                                    .foregroundStyle(.white)
-
-                                if let notes = result.notes {
-                                    Text(notes)
-                                        .font(.caption)
-                                        .foregroundStyle(.white.opacity(0.8))
-                                }
-                            }
-
-                            Button("Done") {
-                                onComplete(result)
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    } else {
-                        ProgressView()
-                            .scaleEffect(1.5)
-                            .tint(.white)
-
-                        Text("Walk around the scanned area...")
-                            .font(.body)
-                            .foregroundStyle(.white)
-
-                        Button("Cancel") {
-                            sessionManager.cancelRelocalizationTest()
-                            onComplete(nil)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
-                    }
-                }
-                .padding()
-                .background(.ultraThinMaterial)
-                .cornerRadius(16)
-                .padding()
-            }
-
-            // Close button
-            VStack {
-                HStack {
-                    Spacer()
-                    Button(action: { onComplete(nil) }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title)
-                            .foregroundStyle(.white.opacity(0.8))
-                    }
-                    .padding()
-                }
-                Spacer()
-            }
-        }
-        .onAppear {
-            setupSession()
-        }
-        .onDisappear {
-            sessionManager.pauseSession()
-        }
-    }
-
-    private func setupSession() {
-        _ = sessionManager.createSession()
-        sessionManager.startSession()
-    }
-
-    private func startTest() {
-        testStarted = true
-
-        Task {
-            do {
-                let testResult = try await sessionManager.testRelocalization(for: bundle)
-                result = testResult
-                testComplete = true
-
-                // Save the test result to the bundle
-                saveTestResult(testResult)
-            } catch {
-                result = RelocalizationTestResult(success: false, notes: error.localizedDescription)
-                testComplete = true
-            }
-        }
-    }
-
-    private func saveTestResult(_ testResult: RelocalizationTestResult) {
-        // Try to update the manifest with the test result
-        var updatedBundle = bundle
-        do {
-            try CaptureBundleManager.shared.updateManifest(for: &updatedBundle) { manifest in
-                if manifest.relocalizationQuality != nil {
-                    manifest.relocalizationQuality?.lastRelocalizationTestDate = Date()
-                    manifest.relocalizationQuality?.lastRelocalizationTestResult = testResult
-                }
-            }
-        } catch {
-            // Silently fail - test result won't be persisted but that's okay
-        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .listRowBackground(Color.clear)
     }
 }
 

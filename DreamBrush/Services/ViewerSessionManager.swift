@@ -99,6 +99,31 @@ final class ViewerSessionManager: NSObject {
         logger.info("Viewer session started for bundle: \(bundle.manifest.bundleId)")
     }
 
+    /// Start session without a bundle (no relocalization, renders at camera position)
+    func startSessionWithoutBundle(modelToCapture: simd_float4x4?) throws {
+        self.relocalizationEnabled = false
+        loadedBundle = nil
+        expectedAnchorName = "CaptureOrigin"
+        captureAnchorTransform = nil
+        modelToCaptureTransform = modelToCapture ?? matrix_identity_float4x4
+
+        resetState()
+
+        let session = ARSession()
+        session.delegate = self
+        self.session = session
+
+        let configuration = ARWorldTrackingConfiguration()
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
+
+        session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        isSessionRunning = true
+        relocalizationMessage = "Rendering without alignment"
+        logger.info("Viewer session started without bundle (no relocalization)")
+    }
+
     func pauseSession() {
         session?.pause()
         isSessionRunning = false

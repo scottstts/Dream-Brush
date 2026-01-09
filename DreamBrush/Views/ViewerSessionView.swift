@@ -12,10 +12,11 @@ import simd
 
 struct ViewerSessionView: View {
     let asset: SplatAsset
-    let bundle: CaptureBundle
+    let bundle: CaptureBundle?
     let relocalizationEnabled: Bool
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(TabBarVisibilityManager.self) private var tabBarVisibility
     @State private var sessionManager = ViewerSessionManager()
     @State private var showingError = false
     @State private var errorMessage = ""
@@ -23,16 +24,16 @@ struct ViewerSessionView: View {
     @State private var splatCount: Int?
     @State private var frameStats: FrameStats?
     @State private var memoryUsageMB: Double?
-    @State private var showPerformanceHUD = true
+    @State private var showPerformanceHUD = false
     @State private var qualityPreset: QualityPreset = .balanced
     @State private var isUserInteracting = false
     @State private var interactionTask: Task<Void, Never>?
     @State private var autoSelectionCompleted = false
     @State private var manualPresetOverride = false
     @State private var autoSelecting = false
-#if DEBUG
-    @State private var renderMode: ViewerARViewContainer.RenderMode = .aligned
-#endif
+    @State private var showRelocIndicator = true
+    @State private var relocIndicatorTask: Task<Void, Never>?
+    @State private var wasRendering = false
 
     var body: some View {
         ZStack {
@@ -42,7 +43,7 @@ struct ViewerSessionView: View {
                 renderTransform: sessionManager.alignmentTransform,
                 shouldRender: effectiveShouldRender,
                 showCameraFeed: !sessionManager.shouldRender,
-                renderMode: currentRenderMode,
+                renderMode: .aligned,
                 preferredFramesPerSecond: qualityPreset.targetFPS,
                 renderScale: qualityPreset.renderScale,
                 maxSplats: qualityPreset.maxSplats(total: asset.gaussianCount),
@@ -57,27 +58,35 @@ struct ViewerSessionView: View {
             .ignoresSafeArea()
 
             VStack {
-                topStatusBar
-                    .padding(.top, 8)
-
                 Spacer()
 
-                bottomOverlay
-                    .padding(.bottom, 24)
+                // Relocalization indicator (conditionally shown)
+                if shouldShowRelocIndicator {
+                    bottomOverlay
+                        .padding(.bottom, 24)
+                        .padding(.horizontal)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
             }
-            .padding(.horizontal)
 
+            // Performance HUD at top right, below toolbar
             if showPerformanceHUD {
-                performanceHUD
-                    .padding(.top, 8)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.horizontal, 12)
+                VStack {
+                    performanceHUD
+                        .padding(.top, 60)
+                        .padding(.trailing, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
         .onChange(of: qualityPreset) { _, _ in
             if !autoSelecting {
                 manualPresetOverride = true
             }
+        }
+        .onChange(of: sessionManager.shouldRender) { oldValue, newValue in
+            handleRenderStateChange(wasRendering: oldValue, isRendering: newValue)
         }
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
@@ -88,9 +97,14 @@ struct ViewerSessionView: View {
                     noteUserInteraction()
                 }
         )
+        .onAppear {
+            tabBarVisibility.isHidden = true
+        }
         .onDisappear {
+            tabBarVisibility.isHidden = false
             sessionManager.pauseSession()
             interactionTask?.cancel()
+            relocIndicatorTask?.cancel()
         }
         .task {
             startSessionIfNeeded()
@@ -121,19 +135,6 @@ struct ViewerSessionView: View {
                     dismiss()
                 }
             }
-#if DEBUG
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    ForEach(ViewerARViewContainer.RenderMode.allCases, id: \.self) { mode in
-                        Button(mode.title) {
-                            renderMode = mode
-                        }
-                    }
-                } label: {
-                    Label("Debug Render", systemImage: "ladybug")
-                }
-            }
-#endif
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Picker("Quality", selection: $qualityPreset) {
@@ -147,88 +148,65 @@ struct ViewerSessionView: View {
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.3), value: showRelocIndicator)
     }
 
-    private var topStatusBar: some View {
-        HStack(spacing: 12) {
-            StatusPill(
-                title: "Tracking",
-                value: sessionManager.trackingState.displayName,
-                color: sessionManager.trackingState.color
-            )
-            StatusPill(
-                title: "Mapping",
-                value: sessionManager.worldMappingStatus.displayName,
-                color: sessionManager.worldMappingStatus.color
-            )
+    // MARK: - Relocalization Indicator Visibility
 
-            let relocalization = relocalizationStatus
-            StatusPill(
-                title: "Reloc",
-                value: relocalization.title,
-                color: relocalization.color
-            )
+    private var shouldShowRelocIndicator: Bool {
+        // Never show when relocalization is disabled
+        guard relocalizationEnabled else { return false }
+        return showRelocIndicator
+    }
+
+    private func handleRenderStateChange(wasRendering: Bool, isRendering: Bool) {
+        relocIndicatorTask?.cancel()
+
+        if isRendering && !wasRendering {
+            // Just started rendering - show indicator briefly then hide
+            showRelocIndicator = true
+            relocIndicatorTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                showRelocIndicator = false
+            }
+        } else if !isRendering && wasRendering {
+            // Rendering stopped (relocalization broke) - show indicator
+            showRelocIndicator = true
+        } else if isRendering {
+            // Still rendering - start hide timer if showing
+            if showRelocIndicator {
+                relocIndicatorTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    showRelocIndicator = false
+                }
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .foregroundStyle(.white)
+
+        self.wasRendering = isRendering
     }
 
     @ViewBuilder
     private var bottomOverlay: some View {
         if sessionManager.shouldRender {
             VStack(spacing: 8) {
-                Label("Rendering enabled", systemImage: "checkmark.circle.fill")
+                Label("Aligned", systemImage: "checkmark.circle.fill")
                     .font(.headline)
                     .foregroundStyle(.green)
 
-                if let summary = alignmentSummary {
-                    Text(summary)
+                if let splatCount {
+                    Text("\(splatCount) splats rendering")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.8))
                 }
-
-                if let anchorError = anchorErrorSummary {
-                    Text(anchorError)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-
-                if let splatCount {
-                    Text("Splats: \(splatCount)")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-
-#if DEBUG
-                if renderMode != .aligned {
-                    Text("Debug mode: \(renderMode.title)")
-                        .font(.caption2)
-                        .foregroundStyle(.yellow)
-                }
-#endif
-            }
-            .padding()
-            .background(.ultraThinMaterial)
-            .cornerRadius(16)
-        } else if !sessionManager.relocalizationEnabled {
-            VStack(spacing: 8) {
-                Label("Relocalization off", systemImage: "location.slash")
-                    .font(.headline)
-                    .foregroundStyle(.yellow)
-
-                Text("Rendering without alignment")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.8))
             }
             .padding()
             .background(.ultraThinMaterial)
             .cornerRadius(16)
         } else if sessionManager.mismatchDetected {
             VStack(spacing: 12) {
-                Label("Not relocalized", systemImage: "xmark.octagon.fill")
+                Label("Not Aligned", systemImage: "xmark.octagon.fill")
                     .font(.headline)
                     .foregroundStyle(.red)
 
@@ -237,10 +215,11 @@ struct ViewerSessionView: View {
                     .foregroundStyle(.white.opacity(0.8))
                     .multilineTextAlignment(.center)
 
-                Button("Retry Relocalization") {
+                Button("Retry") {
                     sessionManager.retryRelocalization()
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
             .padding()
             .background(.ultraThinMaterial)
@@ -250,44 +229,18 @@ struct ViewerSessionView: View {
                 ProgressView()
                     .tint(.white)
 
-                Text(sessionManager.relocalizationMessage)
-                    .font(.body)
+                Text("Searching for alignment...")
+                    .font(.subheadline)
                     .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
 
-                Text("Elapsed: \(Int(sessionManager.relocalizationElapsed))s")
+                Text("\(Int(sessionManager.relocalizationElapsed))s")
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(.white.opacity(0.7))
             }
             .padding()
             .background(.ultraThinMaterial)
             .cornerRadius(16)
         }
-    }
-
-    private var relocalizationStatus: (title: String, color: Color) {
-        if !sessionManager.relocalizationEnabled {
-            return ("Off", .gray)
-        }
-        if sessionManager.shouldRender {
-            return ("Aligned", .green)
-        }
-        if sessionManager.mismatchDetected {
-            return ("Mismatch", .red)
-        }
-        return ("Searching", .orange)
-    }
-
-    private var alignmentSummary: String? {
-        guard let transform = sessionManager.alignmentTransform else { return nil }
-        let t = transform.translation
-        return String(format: "Alignment: (%.2f, %.2f, %.2f)m", t.x, t.y, t.z)
-    }
-
-    private var anchorErrorSummary: String? {
-        guard let positionError = sessionManager.anchorPositionError,
-              let angleError = sessionManager.anchorAngleError else { return nil }
-        return String(format: "Anchor error: %.2fm, %.1fdeg", positionError, angleError * 180 / .pi)
     }
 
     private var performanceHUD: some View {
@@ -348,24 +301,26 @@ struct ViewerSessionView: View {
         if isUserInteracting {
             return false
         }
-#if DEBUG
-        if renderMode != .aligned {
-            return true
-        }
-#endif
         return sessionManager.shouldRender
-    }
-
-    private var currentRenderMode: ViewerARViewContainer.RenderMode {
-#if DEBUG
-        return renderMode
-#else
-        return .aligned
-#endif
     }
 
     private func startSessionIfNeeded() {
         guard !sessionManager.isSessionRunning else { return }
+
+        // Handle optional bundle - when nil, render without alignment
+        guard let bundle else {
+            // Start session without world map (no relocalization)
+            do {
+                try sessionManager.startSessionWithoutBundle(
+                    modelToCapture: modelToCaptureTransform()
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+                showingError = true
+            }
+            return
+        }
+
         do {
             try sessionManager.startSession(
                 for: bundle,

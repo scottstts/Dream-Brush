@@ -10,6 +10,7 @@ import SwiftUI
 
 struct CaptureSessionView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(TabBarVisibilityManager.self) private var tabBarVisibility
     @State private var sessionManager = GuidedCaptureSessionManager()
     @State private var showingError = false
     @State private var errorMessage = ""
@@ -30,20 +31,23 @@ struct CaptureSessionView: View {
 
                 Spacer()
 
-                captureGuide
+                // Capture guide and controls at bottom
+                VStack(spacing: 16) {
+                    captureGuide
 
-                Spacer()
-
-                bottomControls
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 30)
+                    bottomControls
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 30)
             }
         }
         .onAppear {
+            tabBarVisibility.isHidden = true
             _ = sessionManager.createSession()
             sessionManager.startSession()
         }
         .onDisappear {
+            tabBarVisibility.isHidden = false
             sessionManager.pauseSession()
         }
         .alert("Error", isPresented: $showingError) {

@@ -319,6 +319,39 @@ final class CaptureBundleManager: @unchecked Sendable {
         try writeManifest(updatedManifest, to: bundle.bundleURL)
         bundle = CaptureBundle(manifest: updatedManifest, bundleURL: bundle.bundleURL)
     }
+
+    /// Calculates the total size of a directory and all its contents
+    func calculateDirectorySize(at url: URL) -> Int64 {
+        var totalSize: Int64 = 0
+
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        for case let fileURL as URL in enumerator {
+            do {
+                let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                if resourceValues.isRegularFile == true, let fileSize = resourceValues.fileSize {
+                    totalSize += Int64(fileSize)
+                }
+            } catch {
+                logger.warning("Failed to get size for \(fileURL.path): \(error.localizedDescription)")
+            }
+        }
+
+        return totalSize
+    }
+
+    /// Async version of directory size calculation
+    func calculateDirectorySizeAsync(at url: URL) async -> Int64 {
+        await Task.detached(priority: .utility) { [weak self] in
+            self?.calculateDirectorySize(at: url) ?? 0
+        }.value
+    }
 }
 
 enum CaptureBundleError: LocalizedError {

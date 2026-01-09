@@ -7,8 +7,16 @@
 
 import SwiftUI
 
+// MARK: - Tab Bar Visibility Manager
+
+@Observable
+final class TabBarVisibilityManager {
+    var isHidden = false
+}
+
 struct ContentView: View {
     @State private var selectedTab: Tab = .capture
+    @State private var tabBarVisibility = TabBarVisibilityManager()
 
     enum Tab: String, CaseIterable {
         case capture = "Capture"
@@ -44,6 +52,9 @@ struct ContentView: View {
                 }
                 .tag(Tab.library)
         }
+        .environment(tabBarVisibility)
+        .toolbar(tabBarVisibility.isHidden ? .hidden : .visible, for: .tabBar)
+        .animation(.easeInOut(duration: 0.2), value: tabBarVisibility.isHidden)
     }
 }
 
