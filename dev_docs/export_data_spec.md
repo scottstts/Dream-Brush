@@ -5,7 +5,7 @@ This document describes the capture bundle exported by the iOS app. It is derive
 ## Overview
 - Each capture creates a folder named `CaptureBundle_<bundleId>` in the app's Application Support directory.
 - Export returns that folder as-is.
-- The bundle contains RGB frames, optional depth frames, per-frame metadata, keyframe JPEGs, and JSON manifest/anchor data.
+- The bundle contains RGB frames, optional depth frames, per-frame metadata, and JSON manifest/anchor data.
 
 ## Bundle layout
 ```
@@ -13,28 +13,19 @@ CaptureBundle_<bundleId>/
   manifest.json
   anchors.json
   worldmap.arexperience            (optional)
-  keyframes/
-    000001.jpg
-    000123.jpg
-    ...
   frames/
     rgb/
+      000000.jpg
       000001.jpg
-      000002.jpg
       ...
     depth/
-      000001.png                   (optional per-frame)
-      000002.png
-      ...
-    confidence/
-      000001.png                   (optional per-frame)
-      000002.png
+      000000.png                   (optional per-frame)
+      000001.png
       ...
     meta/
+      000000.json
       000001.json
-      000002.json
       ...
-  thumb.jpg                        (optional)
 ```
 
 ### Required vs optional
@@ -44,19 +35,14 @@ CaptureBundle_<bundleId>/
   - `frames/rgb/`
   - `frames/depth/`
   - `frames/meta/`
-  - `keyframes/`
 - Optional files:
   - `worldmap.arexperience` (absent in older or failed captures; used for relocalization)
-  - `thumb.jpg` (read by UI if present; not created by capture code)
-  - `frames/confidence/` (per-frame confidence maps when available)
 
 ## Naming and indexing
-- Frames are numbered with **6-digit, zero-padded, 1-based indices**.
-  - Example: `000001.jpg`, `000001.json`, `000001.png`.
+- Frames are numbered with **6-digit, zero-padded, 0-based indices**.
+  - Example: `000000.jpg`, `000000.json`, `000000.png`.
 - `frames/rgb/*.jpg` and `frames/meta/*.json` exist for every captured frame.
 - `frames/depth/*.png` is only written when depth data is available for that frame.
-- `frames/confidence/*.png` is only written when a confidence map is available for that frame.
-- `keyframes/*.jpg` is a subset of the RGB frames, using the same index as the source frame.
 
 ## File formats
 ### manifest.json
@@ -154,22 +140,13 @@ Notes:
 
 ### frames/rgb/*.jpg
 - JPEG encoded from `ARFrame.capturedImage` via CIImage -> CGImage -> UIImage.
-- Compression quality: **0.88**.
+- Compression quality: **0.90** (panorama capture).
 
 ### frames/depth/*.png
 - 16-bit grayscale PNG.
 - Each pixel is **depth in millimeters**, clamped to `[0, 65535]` and stored as `UInt16`.
 - PNG is written only if a depth map is available for that frame.
 - The depth map is taken from `ARFrame.smoothedSceneDepth` when available, otherwise `ARFrame.sceneDepth`.
-
-### frames/confidence/*.png
-- 8-bit grayscale PNG.
-- Each pixel is `ARConfidenceLevel` raw value:
-  - `0` = low
-  - `1` = medium
-  - `2` = high
-- PNG is written only if a confidence map is available for that frame.
-- Resolution may be downsampled from the original confidence map; consumers should read the PNG dimensions rather than assume it matches depth.
 
 ### frames/meta/*.json
 - JSON, pretty-printed, sorted keys.
@@ -185,6 +162,7 @@ FrameMetadata
 - tracking: TrackingMetadata
 - depth: DepthMetadata?                // optional
 - exposure: ExposureMetadata?          // optional (currently not populated)
+- panorama: PanoramaMetadata?          // optional (panorama capture only)
 - isKeyframe: Bool
 
 CameraMetadata
@@ -213,6 +191,8 @@ DepthMetadata (optional)
 - width: Int                            // depth map width
 - height: Int                           // depth map height
 - confidenceSummary: ConfidenceSummary  // fractions
+- intrinsics: [[Float]]?                // 3x3 row-major, scaled to depth resolution
+- scaleFromRGB: Scale2D?                // depth resolution / RGB resolution
 
 ConfidenceSummary
 - high: Float
@@ -221,22 +201,26 @@ ConfidenceSummary
 
 ExposureMetadata (optional)
 - duration: Double
-- iso: Float
-- whiteBalance: Int
+- iso: Float?
+- whiteBalance: Int?
+
+PanoramaMetadata (optional)
+- anchorYawDegrees: Float
+- relativeYawDegrees: Float
+- yawProgressDegrees: Float
+- panDirection: String                  // "left" | "right" | "unknown"
+- stepDegrees: Float
+- uprightDeviationDegrees: Float
+- angularVelocityDegPerSec: Float
+
+Scale2D
+- x: Float
+- y: Float
 ```
 
 Notes:
-- `depth` is only included when both a depth map and confidence map are available.
-- `exposure` is currently always omitted (not populated in code).
-
-### keyframes/*.jpg
-- JPEGs copied from `frames/rgb/*.jpg` when a frame is selected as a keyframe.
-- Keyframe selection logic:
-  - First captured frame is always a keyframe.
-  - A new keyframe is chosen if either:
-    - Translation from last keyframe > 0.05 meters, or
-    - Rotation angle between camera forward vectors > 0.1 radians (~5.7 degrees).
-  - Maximum keyframes: 300.
+- `depth` is included only when a depth map is available for the frame.
+- `exposure` includes exposure duration; ISO/white balance are currently unset.
 
 ## Coordinate and matrix conventions
 The manifest explicitly defines the conventions used by matrices in metadata:

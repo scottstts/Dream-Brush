@@ -46,7 +46,7 @@ final class CaptureBundleManager: @unchecked Sendable {
         }
     }
 
-    func createBundle(settings: CaptureSettings = CaptureSettings()) throws -> CaptureBundle {
+    func createBundle(settings: CaptureSettings = CaptureSettings(), capturePlan: CapturePlan? = nil) throws -> CaptureBundle {
         let bundleId = UUID().uuidString
         let bundleName = "CaptureBundle_\(bundleId)"
         let bundleURL = bundlesDirectory.appendingPathComponent(bundleName, isDirectory: true)
@@ -56,10 +56,8 @@ final class CaptureBundleManager: @unchecked Sendable {
         try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true)
 
         let subdirectories = [
-            "keyframes",
             "frames/rgb",
             "frames/depth",
-            "frames/confidence",
             "frames/meta"
         ]
 
@@ -68,7 +66,11 @@ final class CaptureBundleManager: @unchecked Sendable {
             try fileManager.createDirectory(at: subURL, withIntermediateDirectories: true)
         }
 
-        let manifest = CaptureManifest(bundleId: bundleId, captureSettings: settings)
+        let manifest = CaptureManifest(
+            bundleId: bundleId,
+            captureSettings: settings,
+            capturePlan: capturePlan
+        )
         try writeManifest(manifest, to: bundleURL)
 
         let anchors = AnchorData(rootAnchor: AnchorInfo())
@@ -189,7 +191,7 @@ final class CaptureBundleManager: @unchecked Sendable {
             warnings.append("worldmap.arexperience not found - relocalization will not be available")
         }
 
-        let requiredDirs = ["frames/rgb", "frames/depth", "frames/meta", "keyframes"]
+        let requiredDirs = ["frames/rgb", "frames/depth", "frames/meta"]
         for dir in requiredDirs {
             let dirURL = bundle.bundleURL.appendingPathComponent(dir)
             var isDir: ObjCBool = false

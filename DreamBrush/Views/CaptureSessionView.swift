@@ -2,7 +2,7 @@
 //  CaptureSessionView.swift
 //  DreamBrush
 //
-//  Created by Scott Sun on 2026/1/5.
+//  Panorama-style capture UI.
 //
 
 import ARKit
@@ -10,75 +10,57 @@ import SwiftUI
 
 struct CaptureSessionView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var sessionManager = CaptureSessionManager()
-    @State private var currentBundle: CaptureBundle?
-    @State private var showingStopConfirmation = false
+    @State private var sessionManager = GuidedCaptureSessionManager()
     @State private var showingError = false
     @State private var errorMessage = ""
-    @State private var captureCompleted = false
-    @State private var coverageOverlayEnabled = true
 
     var body: some View {
         ZStack {
-            // AR Camera Preview
             ARViewContainer(
                 session: sessionManager.session ?? ARSession(),
-                showCoverageOverlay: coverageOverlayEnabled,
-                isRecording: sessionManager.isRecording
+                showCoverageOverlay: false,
+                isRecording: sessionManager.isCapturing
             )
-                .ignoresSafeArea()
+            .ignoresSafeArea()
 
-            // Overlay UI
-            VStack {
-                // Top status bar
+            VStack(spacing: 16) {
                 topStatusBar
+                    .padding(.horizontal)
                     .padding(.top, 8)
 
                 Spacer()
 
-                // Bottom controls
-                bottomControls
-                    .padding(.bottom, 30)
-            }
+                captureGuide
 
-            // Recording indicator
-            if sessionManager.isRecording {
-                recordingOverlay
+                Spacer()
+
+                bottomControls
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 30)
             }
         }
         .onAppear {
-            setupSession()
+            _ = sessionManager.createSession()
+            sessionManager.startSession()
         }
         .onDisappear {
             sessionManager.pauseSession()
-        }
-        .alert("Finalize Scan?", isPresented: $showingStopConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Finalize & Save") {
-                Task {
-                    await stopRecording()
-                }
-            }
-        } message: {
-            Text(finalizationMessage)
         }
         .alert("Error", isPresented: $showingError) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage)
         }
-        .onChange(of: captureCompleted) { _, completed in
-            if completed {
+        .onChange(of: sessionManager.isCaptureComplete) { _, isComplete in
+            if isComplete {
                 dismiss()
             }
         }
-        .navigationBarBackButtonHidden(sessionManager.isRecording)
+        .navigationBarBackButtonHidden(sessionManager.isCapturing)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                if !sessionManager.isRecording {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+                if !sessionManager.isCapturing {
+                    Button("Cancel") { dismiss() }
                 }
             }
         }
@@ -87,283 +69,97 @@ struct CaptureSessionView: View {
     // MARK: - Top Status Bar
 
     private var topStatusBar: some View {
-        VStack(spacing: 8) {
-            // Tracking & Mapping Status
-            HStack(spacing: 16) {
-                StatusPill(
-                    title: "Tracking",
-                    value: sessionManager.trackingState.displayName,
-                    color: sessionManager.trackingState.color
-                )
+        HStack(spacing: 12) {
+            StatusPill(
+                title: "Tracking",
+                value: sessionManager.trackingState.displayName,
+                color: sessionManager.trackingState.color
+            )
 
-                StatusPill(
-                    title: "Mapping",
-                    value: sessionManager.worldMappingStatus.displayName,
-                    color: sessionManager.worldMappingStatus.color
-                )
+            StatusPill(
+                title: "Mapping",
+                value: sessionManager.worldMappingStatus.displayName,
+                color: sessionManager.worldMappingStatus.color
+            )
 
-                if sessionManager.depthAvailable {
-                    StatusPill(
-                        title: "Depth",
-                        value: "On",
-                        color: .green
-                    )
-                }
-            }
-
-            // Recording stats (only when recording)
-            if sessionManager.isRecording {
-                recordingStats
-            }
+            StatusPill(
+                title: "Upright",
+                value: sessionManager.isUpright ? "Good" : "Adjust",
+                color: sessionManager.isUpright ? .green : .orange
+            )
         }
-        .padding(.horizontal)
     }
 
-    private var recordingStats: some View {
-        HStack(spacing: 20) {
-            StatView(icon: "photo.stack", value: "\(sessionManager.frameCount)", label: "Frames")
-            StatView(icon: "star.fill", value: "\(sessionManager.keyframeCount)", label: "Keyframes")
-            StatView(icon: "cube", value: "\(sessionManager.depthFrameCount)", label: "Depth")
-            StatView(icon: "internaldrive", value: formatBytes(sessionManager.estimatedStorageBytes), label: "Size")
+    // MARK: - Capture Guide
+
+    private var captureGuide: some View {
+        VStack(spacing: 12) {
+            Text("Panorama Capture")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+
+            Text(sessionManager.alignmentHint)
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+                .multilineTextAlignment(.center)
+
+            ProgressView(value: min(sessionManager.yawProgressDegrees / 360, 1))
+                .tint(.green)
+
+            Text("\(sessionManager.captureCount) photos")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
         .background(.ultraThinMaterial)
-        .cornerRadius(12)
+        .cornerRadius(16)
     }
 
     // MARK: - Bottom Controls
 
     private var bottomControls: some View {
-        VStack(spacing: 16) {
-            // Duration display when recording
-            if sessionManager.isRecording {
-                Text(formatDuration(sessionManager.recordingDuration))
-                    .font(.system(size: 48, weight: .light, design: .monospaced))
-                    .foregroundStyle(.white)
-
-                // Relocalization status indicators
-                relocalizationStatusView
-            }
-
-            // Main control button
-            HStack(spacing: 40) {
-                if sessionManager.isRecording {
-                    // Stop/Finalize button
-                    Button(action: { showingStopConfirmation = true }) {
-                        ZStack {
-                            Circle()
-                                .fill(.white)
-                                .frame(width: 80, height: 80)
-
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(sessionManager.canFinalizeScan ? .green : .orange)
-                                .frame(width: 32, height: 32)
-                        }
+        VStack(spacing: 12) {
+            if sessionManager.isCapturing {
+                if sessionManager.canManualCapture {
+                    Button(action: sessionManager.captureFirstManually) {
+                        Label("Capture First Wall", systemImage: "camera.fill")
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.green)
+                            .foregroundStyle(.white)
+                            .cornerRadius(12)
                     }
-                } else {
-                    // Start recording button
-                    Button(action: startRecording) {
-                        ZStack {
-                            Circle()
-                                .stroke(.white, lineWidth: 4)
-                                .frame(width: 80, height: 80)
-
-                            Circle()
-                                .fill(.red)
-                                .frame(width: 64, height: 64)
-                        }
-                    }
-                    .disabled(!canStartRecording)
-                    .opacity(canStartRecording ? 1.0 : 0.5)
                 }
-            }
 
-            if !sessionManager.isRecording {
-                captureSettingsView
-            }
-
-            // Helper text
-            if !sessionManager.isRecording {
-                Text(canStartRecording ? "Tap to start recording" : "Waiting for good tracking...")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.8))
-            } else {
-                Text(sessionManager.finalizationBlockedReason ?? "Tap square to finalize scan")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.8))
-            }
-        }
-        .padding(.horizontal)
-    }
-
-    // MARK: - Relocalization Status View
-
-    private var relocalizationStatusView: some View {
-        HStack(spacing: 12) {
-            // Root anchor indicator
-            HStack(spacing: 4) {
-                Image(systemName: sessionManager.rootAnchorSet ? "mappin.circle.fill" : "mappin.circle")
-                    .foregroundStyle(sessionManager.rootAnchorSet ? .green : .gray)
-                Text("Anchor")
-                    .font(.caption2)
-            }
-
-            // Mapping status indicator
-            HStack(spacing: 4) {
-                Image(systemName: sessionManager.hasReachedMappedStatus ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(sessionManager.hasReachedMappedStatus ? .green : .yellow)
-                Text("Mapped")
-                    .font(.caption2)
-            }
-
-            // World map readiness
-            HStack(spacing: 4) {
-                Image(systemName: sessionManager.canFinalizeScan ? "globe.americas.fill" : "globe.americas")
-                    .foregroundStyle(sessionManager.canFinalizeScan ? .green : .orange)
-                Text("World Map")
-                    .font(.caption2)
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-    }
-
-    private var captureSettingsView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Capture Resolution")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.85))
-
-            Picker("Capture Resolution", selection: resolutionBinding) {
-                ForEach(CaptureResolutionPreset.allCases) { preset in
-                    Text(preset.title).tag(preset)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Text(resolutionBinding.wrappedValue.subtitle)
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
-
-            Toggle("Coverage Overlay", isOn: coverageOverlayBinding)
-                .font(.caption)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-    }
-
-    // MARK: - Recording Overlay
-
-    private var recordingOverlay: some View {
-        VStack {
-            HStack {
-                Spacer()
-
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 10, height: 10)
-                        .modifier(PulsingModifier())
-
-                    Text("REC")
-                        .font(.caption.bold())
+                Button(action: sessionManager.cancelCapture) {
+                    Label("Stop Capture", systemImage: "xmark.circle")
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.red.opacity(0.85))
                         .foregroundStyle(.white)
+                        .cornerRadius(12)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.red.opacity(0.8))
-                .cornerRadius(20)
-                .padding()
+            } else {
+                Button(action: startCapture) {
+                    Label("Start Capture", systemImage: "camera.circle")
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.accentColor)
+                        .foregroundStyle(.white)
+                        .cornerRadius(12)
+                }
             }
-
-            Spacer()
         }
     }
 
-    // MARK: - Computed Properties
-
-    private var canStartRecording: Bool {
-        sessionManager.isSessionRunning &&
-            sessionManager.trackingState == .normal
-    }
-
-    private var finalizationMessage: String {
-        var message = "This will save the capture bundle with \(sessionManager.frameCount) frames"
-
-        if sessionManager.hasReachedMappedStatus {
-            message += " and world map for relocalization."
-        } else if sessionManager.worldMappingStatus == .extending {
-            message += ".\n\nNote: Mapping is still extending. For best relocalization, consider scanning more of the space."
-        } else {
-            message += ".\n\nWarning: Mapping status is limited. Relocalization may not work well."
-        }
-
-        return message
-    }
-
-    // MARK: - Actions
-
-    private func setupSession() {
-        _ = sessionManager.createSession()
-        sessionManager.updateCoverageOverlayEnabled(coverageOverlayEnabled)
-        sessionManager.startSession()
-    }
-
-    private func startRecording() {
+    private func startCapture() {
         do {
-            currentBundle = try sessionManager.startRecording()
+            _ = try sessionManager.beginCapture()
         } catch {
             errorMessage = error.localizedDescription
             showingError = true
         }
-    }
-
-    private func stopRecording() async {
-        do {
-            let bundle = try await sessionManager.stopRecording()
-            currentBundle = bundle
-            captureCompleted = true
-        } catch {
-            errorMessage = error.localizedDescription
-            showingError = true
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func formatDuration(_ duration: TimeInterval) -> String {
-        let minutes = Int(duration) / 60
-        let seconds = Int(duration) % 60
-        return String(format: "%02d:%02d", minutes, seconds)
-    }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
-
-    private var resolutionBinding: Binding<CaptureResolutionPreset> {
-        Binding(
-            get: { self.sessionManager.config.captureResolution },
-            set: { newValue in
-                self.sessionManager.updateCaptureResolution(newValue)
-            }
-        )
-    }
-
-    private var coverageOverlayBinding: Binding<Bool> {
-        Binding(
-            get: { self.coverageOverlayEnabled },
-            set: { newValue in
-                self.coverageOverlayEnabled = newValue
-                self.sessionManager.updateCoverageOverlayEnabled(newValue)
-            }
-        )
     }
 }
 
@@ -384,45 +180,10 @@ struct StatusPill: View {
                 .font(.caption.bold())
                 .foregroundStyle(color)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.ultraThinMaterial)
         .cornerRadius(8)
-    }
-}
-
-struct StatView: View {
-    let icon: String
-    let value: String
-    let label: String
-
-    var body: some View {
-        VStack(spacing: 2) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.caption2)
-                Text(value)
-                    .font(.caption.bold())
-            }
-            .foregroundStyle(.white)
-
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
-        }
-    }
-}
-
-struct PulsingModifier: ViewModifier {
-    @State private var isPulsing = false
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(isPulsing ? 0.3 : 1.0)
-            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
-            .onAppear {
-                isPulsing = true
-            }
     }
 }
 

@@ -675,11 +675,7 @@ final class CaptureSessionManager: NSObject {
                         }
                     }
 
-                    // Write confidence map if available
-                    var confidenceSize: Int64 = 0
-                    if let confidenceData = capturedData.confidenceData {
-                        confidenceSize = try self.writeConfidenceData(confidenceData, index: nextFrameIndex, to: bundle)
-                    }
+                    let confidenceSize: Int64 = 0
 
                     // Write metadata
                     let metaSize = try self.writeFrameMetadata(capturedData.metadata, index: nextFrameIndex, to: bundle)
@@ -698,7 +694,7 @@ final class CaptureSessionManager: NSObject {
                         if isKeyframe {
                             self.keyframeCount += 1
                         }
-                        self.estimatedStorageBytes += rgbSize + depthSize + confidenceSize + metaSize
+                    self.estimatedStorageBytes += rgbSize + depthSize + confidenceSize + metaSize
                         self.recordingDuration = Date().timeIntervalSince(self.recordingStartTime ?? Date())
                         self.depthAvailabilityRate = self.totalFramesProcessed > 0
                             ? Double(self.totalFramesWithDepth) / Double(self.totalFramesProcessed)
@@ -733,17 +729,7 @@ final class CaptureSessionManager: NSObject {
             }
         }
 
-        var confidenceData: Data? = nil
-        if let confidenceMap = frame.smoothedSceneDepth?.confidenceMap ?? frame.sceneDepth?.confidenceMap {
-            do {
-                confidenceData = try encodeConfidenceTo8BitPNG(
-                    confidenceMap,
-                    downsampleFactor: config.depthConfidenceDownsampleFactor
-                )
-            } catch {
-                logger.error("Failed to encode depth confidence: \(error.localizedDescription)")
-            }
-        }
+        let confidenceData: Data? = nil
 
         // Build metadata immediately
         let metadata = buildFrameMetadata(from: frame, index: index, isKeyframe: isKeyframe)
@@ -808,13 +794,31 @@ final class CaptureSessionManager: NSObject {
         if let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap,
            let confidenceMap = frame.smoothedSceneDepth?.confidenceMap ?? frame.sceneDepth?.confidenceMap {
             let confidenceSummary = calculateConfidenceSummary(confidenceMap)
+            let depthWidth = CVPixelBufferGetWidth(depthMap)
+            let depthHeight = CVPixelBufferGetHeight(depthMap)
+            let scaleX = Float(depthWidth) / Float(camera.imageResolution.width)
+            let scaleY = Float(depthHeight) / Float(camera.imageResolution.height)
+            let depthIntrinsics = [
+                [intrinsics.columns.0.x * scaleX, intrinsics.columns.1.x * scaleX, intrinsics.columns.2.x * scaleX],
+                [intrinsics.columns.0.y * scaleY, intrinsics.columns.1.y * scaleY, intrinsics.columns.2.y * scaleY],
+                [intrinsics.columns.0.z, intrinsics.columns.1.z, intrinsics.columns.2.z]
+            ]
             depthMetadata = DepthMetadata(
                 available: true,
-                width: CVPixelBufferGetWidth(depthMap),
-                height: CVPixelBufferGetHeight(depthMap),
-                confidenceSummary: confidenceSummary
+                width: depthWidth,
+                height: depthHeight,
+                confidenceSummary: confidenceSummary,
+                intrinsics: depthIntrinsics,
+                scaleFromRGB: Scale2D(x: scaleX, y: scaleY)
             )
         }
+
+        let exposureDuration = camera.exposureDuration
+        let exposureMetadata = ExposureMetadata(
+            duration: exposureDuration,
+            iso: nil,
+            whiteBalance: nil
+        )
 
         return FrameMetadata(
             frameIndex: index,
@@ -823,7 +827,8 @@ final class CaptureSessionManager: NSObject {
             camera: cameraMetadata,
             tracking: trackingMetadata,
             depth: depthMetadata,
-            exposure: nil,
+            exposure: exposureMetadata,
+            panorama: nil,
             isKeyframe: isKeyframe
         )
     }
@@ -840,11 +845,6 @@ final class CaptureSessionManager: NSObject {
         }
         try jpegData.write(to: jpegURL, options: .atomic)
 
-        if isKeyframe {
-            let keyframeURL = bundle.bundleURL.appendingPathComponent("keyframes/\(fileName).jpg")
-            try jpegData.write(to: keyframeURL, options: .atomic)
-        }
-
         return Int64(jpegData.count)
     }
 
@@ -852,13 +852,6 @@ final class CaptureSessionManager: NSObject {
         let fileName = String(format: "%06d.png", index)
         let depthURL = bundle.bundleURL.appendingPathComponent("frames/depth/\(fileName)")
         try pngData.write(to: depthURL, options: .atomic)
-        return Int64(pngData.count)
-    }
-
-    private func writeConfidenceData(_ pngData: Data, index: Int, to bundle: CaptureBundle) throws -> Int64 {
-        let fileName = String(format: "%06d.png", index)
-        let confidenceURL = bundle.bundleURL.appendingPathComponent("frames/confidence/\(fileName)")
-        try pngData.write(to: confidenceURL, options: .atomic)
         return Int64(pngData.count)
     }
 
@@ -917,63 +910,6 @@ final class CaptureSessionManager: NSObject {
         }
 
         // Encode as PNG
-        let uiImage = UIImage(cgImage: cgImage)
-        guard let pngData = uiImage.pngData() else {
-            throw CaptureError.depthConversionFailed
-        }
-
-        return pngData
-    }
-
-    private func encodeConfidenceTo8BitPNG(_ confidenceMap: CVPixelBuffer, downsampleFactor: Int) throws -> Data {
-        CVPixelBufferLockBaseAddress(confidenceMap, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(confidenceMap, .readOnly) }
-
-        let width = CVPixelBufferGetWidth(confidenceMap)
-        let height = CVPixelBufferGetHeight(confidenceMap)
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(confidenceMap) else {
-            throw CaptureError.depthConversionFailed
-        }
-
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(confidenceMap)
-        let src = baseAddress.assumingMemoryBound(to: UInt8.self)
-
-        let factor = max(1, downsampleFactor)
-        let outWidth = max(1, width / factor)
-        let outHeight = max(1, height / factor)
-
-        var outData = [UInt8](repeating: 0, count: outWidth * outHeight)
-        for y in 0..<outHeight {
-            let srcY = y * factor
-            let srcRow = src.advanced(by: srcY * bytesPerRow)
-            for x in 0..<outWidth {
-                outData[y * outWidth + x] = srcRow[x * factor]
-            }
-        }
-
-        let bitsPerComponent = 8
-        let bitsPerPixel = 8
-        let bytesPerRowOut = outWidth
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
-
-        guard let provider = CGDataProvider(data: Data(outData) as CFData),
-              let cgImage = CGImage(
-                  width: outWidth,
-                  height: outHeight,
-                  bitsPerComponent: bitsPerComponent,
-                  bitsPerPixel: bitsPerPixel,
-                  bytesPerRow: bytesPerRowOut,
-                  space: CGColorSpaceCreateDeviceGray(),
-                  bitmapInfo: bitmapInfo,
-                  provider: provider,
-                  decode: nil,
-                  shouldInterpolate: false,
-                  intent: .defaultIntent
-              ) else {
-            throw CaptureError.depthConversionFailed
-        }
-
         let uiImage = UIImage(cgImage: cgImage)
         guard let pngData = uiImage.pngData() else {
             throw CaptureError.depthConversionFailed

@@ -4,15 +4,15 @@
 
 DreamBrush is a proof-of-concept iOS app that enables:
 
-1. **Capture**: Scan interior spaces using iPhone camera + LiDAR (when available) via ARKit
-2. **Export**: Record structured "capture bundles" containing RGB frames, camera intrinsics/poses, depth maps, and ARKit relocalization artifacts for offline 3D Gaussian Splat (3DGS) training on Mac
+1. **Capture**: Panorama-style sweep using iPhone camera + LiDAR (when available) via ARKit, upright-only gating
+2. **Export**: Record structured "capture bundles" containing RGB frames, camera intrinsics/poses, depth maps, and ARKit relocalization artifacts for offline **SHARP inference** and splat merge on Mac
 3. **Import**: Accept pre-trained 3DGS assets back onto the device via standard file transfer
 4. **View**: Render 3DGS in AR with strict relocalization gating and coordinate alignment
 5. **Style**: Provide simple appearance-only "style" controls (color/tonemapping presets)
 
 ## Constraints & Non-Goals (Part 1)
 
-- **No on-device 3DGS training** - training happens offline on Mac
+- **No on-device 3DGS training** - SHARP inference + merge happens offline on Mac
 - **No cloud/GPU backend services** - all processing is local
 - **No complex diffusion stylization** - only basic color adjustments
 - **No multi-user shared AR persistence** - single-user workflow only
@@ -40,7 +40,7 @@ DreamBrush is a proof-of-concept iOS app that enables:
 
 ---
 
-# Capture Bundle Format Specification
+# Capture Bundle Format Specification (Panorama Capture)
 
 ## Directory Structure
 
@@ -49,26 +49,19 @@ CaptureBundle_<UUID>/
 ├── manifest.json           # Global metadata and settings
 ├── worldmap.arexperience   # Serialized ARWorldMap bytes
 ├── anchors.json            # Root anchor and additional anchors
-├── thumb.jpg               # Preview thumbnail for UI
-├── keyframes/              # Selected key frames for training
-│   ├── 000001.jpg
-│   ├── 000002.jpg
-│   └── ...
 ├── frames/
 │   ├── rgb/                # All recorded RGB frames
-│   │   ├── 000001.heic
-│   │   ├── 000002.heic
+│   │   ├── 000000.jpg
+│   │   ├── 000001.jpg
 │   │   └── ...
 │   ├── depth/              # Depth maps (when available)
-│   │   ├── 000001.png      # 16-bit PNG, millimeters
-│   │   ├── 000002.png
+│   │   ├── 000000.png      # 16-bit PNG, millimeters
+│   │   ├── 000001.png
 │   │   └── ...
 │   └── meta/               # Per-frame metadata
+│       ├── 000000.json
 │       ├── 000001.json
-│       ├── 000002.json
 │       └── ...
-└── mesh/                   # Optional: ARMeshAnchor data
-    └── mesh.ply
 ```
 
 ## File Formats
@@ -87,7 +80,7 @@ CaptureBundle_<UUID>/
   "deviceName": "iPhone 14 Pro Max",
 
   "captureSettings": {
-    "targetFPS": 10,
+    "targetFPS": 0,
     "depthEnabled": true,
     "meshReconstructionEnabled": false,
     "smoothedDepth": true
@@ -95,9 +88,9 @@ CaptureBundle_<UUID>/
 
   "captureStats": {
     "durationSeconds": 60.5,
-    "frameCount": 605,
-    "keyframeCount": 50,
-    "depthFrameCount": 600,
+    "frameCount": 10,
+    "keyframeCount": 10,
+    "depthFrameCount": 10,
     "averageTrackingQuality": 0.95,
     "finalMappingStatus": "mapped",
     "estimatedSizeBytes": 524288000
@@ -105,7 +98,7 @@ CaptureBundle_<UUID>/
 
   "coordinateConventions": {
     "handedness": "right",
-    "matrixLayout": "column_major",
+    "matrixLayout": "row_major",
     "transformDirection": "camera_to_world",
     "upAxis": "Y",
     "units": "meters"
@@ -179,13 +172,32 @@ CaptureBundle_<UUID>/
       "high": 0.85,
       "medium": 0.10,
       "low": 0.05
+    },
+    "intrinsics": [
+      [fx, 0.0, cx],
+      [0.0, fy, cy],
+      [0.0, 0.0, 1.0]
+    ],
+    "scaleFromRGB": {
+      "x": 0.5,
+      "y": 0.5
     }
   },
 
   "exposure": {
     "duration": 0.033,
-    "iso": 100,
-    "whiteBalance": 5500
+    "iso": null,
+    "whiteBalance": null
+  },
+
+  "panorama": {
+    "anchorYawDegrees": 0.0,
+    "relativeYawDegrees": 45.0,
+    "yawProgressDegrees": 135.0,
+    "panDirection": "left",
+    "stepDegrees": 32.0,
+    "uprightDeviationDegrees": 2.5,
+    "angularVelocityDegPerSec": 60.0
   },
 
   "isKeyframe": false
@@ -195,7 +207,7 @@ CaptureBundle_<UUID>/
 ## Coordinate System Conventions
 
 1. **Handedness**: Right-handed (ARKit native)
-2. **Matrix Layout**: Column-major when serialized to JSON arrays
+2. **Matrix Layout**: Row-major when serialized to JSON arrays
 3. **Transform Direction**: Camera-to-world (ARCamera.transform)
 4. **Up Axis**: +Y is up
 5. **Units**: Meters
@@ -221,16 +233,3 @@ CaptureBundle_<UUID>/
 2. **Capture Anchor Space**: Stable origin defined by root anchor at scan time
 3. **Splat Model Space**: Coordinate space produced by offline training
 4. **Viewer Alignment Transform**: Runtime composition linking all spaces for rendering
-
----
-
-# Milestone Checklist (Part 1)
-
-- [ ] App launches with Capture/Viewer/Library tabs
-- [ ] Can create CaptureBundle folder with valid manifest.json
-- [ ] Can record 30-60 second scan with RGB + metadata + depth
-- [ ] Can export bundle as zip to Files app
-- [ ] Can import splat asset and list in Asset Library
-- [ ] Viewer gates rendering on relocalization
-- [ ] Style presets work without affecting alignment
-- [ ] End-to-end demo: scan → export → train → import → view

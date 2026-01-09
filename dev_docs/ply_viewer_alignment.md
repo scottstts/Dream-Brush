@@ -1,12 +1,11 @@
 # PLY Viewer Alignment (DreamBrush)
 
-This note documents how the iOS viewer expects and renders Gaussian Splat PLY assets, and how that aligns with the training output produced by `training/train_3dgs.ipynb`.
+This note documents how the iOS viewer expects and renders Gaussian Splat PLY assets.
 
 ## Summary
 - The app does **not** reinterpret Gaussian parameters in Swift.
 - PLY parsing and rendering are delegated to **MetalSplatter** (`SplatRenderer.readPLY`).
 - The expected PLY schema matches standard 3DGS exports (position, normal, DC color, logit opacity, log-scale, quaternion).
-- The training notebook exports PLY via `ns-export gaussian-splat`, which matches MetalSplatter's expected schema.
 
 ## Expected PLY Schema (as used by the app)
 The app expects a standard 3DGS PLY with the following fields for each vertex (Gaussian):
@@ -46,19 +45,6 @@ The only PLY modification is removal of `obj_info` header lines (MetalSplatter's
 Files:
 - `DreamBrush/Services/SplatAssetManager.swift`
 - `DreamBrush/Views/ViewerARViewContainer.swift`
-
-## Alignment with Training Output
-The training notebook exports with:
-
-```
-ns-export gaussian-splat --load-config <...> --output-dir <...>
-```
-
-`ns-export gaussian-splat` emits the standard 3DGS PLY schema used above.
-Since the app uses MetalSplatter's PLY parser directly, the viewer and training output are aligned without additional conversion.
-
-Notebook reference:
-- `training/train_3dgs.ipynb`
 
 ## Potential Pitfalls (not in app code)
 - Exporting a **non-standard PLY schema** (different property names or parameterization) can render incorrectly.

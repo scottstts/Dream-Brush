@@ -37,6 +37,7 @@ struct CaptureManifest: Codable {
     let deviceName: String
 
     let captureSettings: CaptureSettings
+    let capturePlan: CapturePlan?
     var captureStats: CaptureStats
     let coordinateConventions: CoordinateConventions
     var relocalizationQuality: RelocalizationQuality?
@@ -45,7 +46,8 @@ struct CaptureManifest: Codable {
 
     init(
         bundleId: String = UUID().uuidString,
-        captureSettings: CaptureSettings = CaptureSettings()
+        captureSettings: CaptureSettings = CaptureSettings(),
+        capturePlan: CapturePlan? = nil
     ) {
         self.version = Self.currentVersion
         self.bundleId = bundleId
@@ -56,6 +58,7 @@ struct CaptureManifest: Codable {
         self.deviceModel = Self.deviceModelIdentifier()
         self.deviceName = UIDevice.current.name
         self.captureSettings = captureSettings
+        self.capturePlan = capturePlan
         self.captureStats = CaptureStats()
         self.coordinateConventions = CoordinateConventions()
         self.relocalizationQuality = nil
@@ -305,6 +308,7 @@ struct FrameMetadata: Codable {
     let tracking: TrackingMetadata
     let depth: DepthMetadata?
     let exposure: ExposureMetadata?
+    let panorama: PanoramaMetadata?
 
     var isKeyframe: Bool
 }
@@ -339,6 +343,8 @@ struct DepthMetadata: Codable {
     let width: Int
     let height: Int
     let confidenceSummary: ConfidenceSummary
+    let intrinsics: [[Float]]?
+    let scaleFromRGB: Scale2D?
 }
 
 struct ConfidenceSummary: Codable {
@@ -349,6 +355,21 @@ struct ConfidenceSummary: Codable {
 
 struct ExposureMetadata: Codable {
     let duration: Double
-    let iso: Float
-    let whiteBalance: Int
+    let iso: Float?
+    let whiteBalance: Int?
+}
+
+struct PanoramaMetadata: Codable {
+    let anchorYawDegrees: Float
+    let relativeYawDegrees: Float
+    let yawProgressDegrees: Float
+    let panDirection: String
+    let stepDegrees: Float
+    let uprightDeviationDegrees: Float
+    let angularVelocityDegPerSec: Float
+}
+
+struct Scale2D: Codable {
+    let x: Float
+    let y: Float
 }

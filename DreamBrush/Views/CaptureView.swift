@@ -24,7 +24,7 @@ struct CaptureView: View {
                     .font(.title)
                     .fontWeight(.semibold)
 
-                Text("Scan interior spaces using ARKit and LiDAR")
+                Text("Guided multi-angle capture for SHARP splats")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
