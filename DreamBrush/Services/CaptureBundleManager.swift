@@ -321,8 +321,11 @@ final class CaptureBundleManager: @unchecked Sendable {
     }
 
     /// Calculates the total size of a directory and all its contents
-    func calculateDirectorySize(at url: URL) -> Int64 {
+    nonisolated func calculateDirectorySize(at url: URL) -> Int64 {
         var totalSize: Int64 = 0
+
+        let fileManager = FileManager.default
+        let logger = Logger(subsystem: "com.scottsun.DreamBrush", category: "CaptureBundleManager")
 
         guard let enumerator = fileManager.enumerator(
             at: url,
