@@ -1,0 +1,29 @@
+# Default configuration for 3DGS pipeline
+# These values can be overridden via command line arguments
+
+# Frame quality filtering (run_sharp.py)
+frame_filter:
+  max_angular_velocity_deg_per_sec: 120.0
+  max_exposure_duration_sec: 0.05
+  max_upright_deviation_deg: 20.0
+
+# SHARP inference
+inference:
+  device: "default"  # "cpu", "mps", "cuda", or "default" (auto-detect)
+  skip_existing: true
+
+# Merge/alignment (merge_splats.py)
+merge:
+  voxel_size_m: 0.03  # Voxel size in meters for deduplication
+  depth_prune: true
+  depth_threshold_m: 0.15  # Max depth disagreement in meters
+  min_opacity_logit: -2.0  # Filter low-opacity splats
+  max_scale_log: 1.0  # Filter overly large splats
+
+# Coordinate conventions (for reference, from capture bundle)
+# These should match manifest.json conventions:
+#   handedness: right
+#   matrixLayout: row_major
+#   transformDirection: camera_to_world
+#   upAxis: Y
+#   units: meters
