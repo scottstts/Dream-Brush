@@ -8,6 +8,7 @@
 import ARKit
 import Darwin
 import SwiftUI
+import UIKit
 import simd
 
 struct ViewerSessionView: View {
@@ -26,14 +27,13 @@ struct ViewerSessionView: View {
     @State private var memoryUsageMB: Double?
     @State private var showPerformanceHUD = false
     @State private var qualityPreset: QualityPreset = .balanced
-    @State private var isUserInteracting = false
-    @State private var interactionTask: Task<Void, Never>?
     @State private var autoSelectionCompleted = false
     @State private var manualPresetOverride = false
     @State private var autoSelecting = false
     @State private var showRelocIndicator = true
     @State private var relocIndicatorTask: Task<Void, Never>?
     @State private var wasRendering = false
+    @State private var wasIdleTimerDisabled: Bool?
 
     var body: some View {
         ZStack {
@@ -42,7 +42,7 @@ struct ViewerSessionView: View {
                 splatURL: asset.fileURL,
                 renderTransform: sessionManager.alignmentTransform,
                 shouldRender: effectiveShouldRender,
-                showCameraFeed: !sessionManager.shouldRender,
+                showCameraFeed: shouldShowCameraFeed,
                 renderMode: .aligned,
                 preferredFramesPerSecond: qualityPreset.targetFPS,
                 renderScale: qualityPreset.renderScale,
@@ -88,23 +88,20 @@ struct ViewerSessionView: View {
         .onChange(of: sessionManager.shouldRender) { oldValue, newValue in
             handleRenderStateChange(wasRendering: oldValue, isRendering: newValue)
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    noteUserInteraction()
-                }
-                .onEnded { _ in
-                    noteUserInteraction()
-                }
-        )
         .onAppear {
             tabBarVisibility.isHidden = true
+            if wasIdleTimerDisabled == nil {
+                wasIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+            }
+            UIApplication.shared.isIdleTimerDisabled = true
         }
         .onDisappear {
             tabBarVisibility.isHidden = false
             sessionManager.pauseSession()
-            interactionTask?.cancel()
             relocIndicatorTask?.cancel()
+            if let wasIdleTimerDisabled {
+                UIApplication.shared.isIdleTimerDisabled = wasIdleTimerDisabled
+            }
         }
         .task {
             startSessionIfNeeded()
@@ -157,6 +154,10 @@ struct ViewerSessionView: View {
         // Never show when relocalization is disabled
         guard relocalizationEnabled else { return false }
         return showRelocIndicator
+    }
+
+    private var shouldShowCameraFeed: Bool {
+        relocalizationEnabled && !sessionManager.shouldRender
     }
 
     private func handleRenderStateChange(wasRendering: Bool, isRendering: Bool) {
@@ -298,9 +299,6 @@ struct ViewerSessionView: View {
     }
 
     private var effectiveShouldRender: Bool {
-        if isUserInteracting {
-            return false
-        }
         return sessionManager.shouldRender
     }
 
@@ -342,15 +340,6 @@ struct ViewerSessionView: View {
         while !Task.isCancelled {
             memoryUsageMB = currentMemoryUsageMB()
             try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
-    }
-
-    private func noteUserInteraction() {
-        isUserInteracting = true
-        interactionTask?.cancel()
-        interactionTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            isUserInteracting = false
         }
     }
 

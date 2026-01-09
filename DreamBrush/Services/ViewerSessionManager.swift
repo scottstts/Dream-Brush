@@ -35,7 +35,7 @@ final class ViewerSessionManager: NSObject {
 
     var shouldRender: Bool {
         if !relocalizationEnabled {
-            return trackingState == .normal
+            return trackingState != .notAvailable
         }
         return isRelocalized && !mismatchDetected
     }
@@ -222,7 +222,7 @@ private extension ViewerSessionManager {
 
     func updateRelocalizationState() {
         if !relocalizationEnabled {
-            isRelocalized = trackingState == .normal
+            isRelocalized = trackingState != .notAvailable
             mismatchDetected = false
             mismatchReason = nil
             return
@@ -301,7 +301,8 @@ private extension ViewerSessionManager {
             alignmentTransform = nil
             return
         }
-        alignmentTransform = currentAnchorTransform * modelToCaptureTransform
+        let captureAnchor = captureAnchorTransform ?? matrix_identity_float4x4
+        alignmentTransform = currentAnchorTransform * simd_inverse(captureAnchor) * modelToCaptureTransform
     }
 
     func updateRelocalizationMessage() {

@@ -224,7 +224,7 @@ private struct ViewerAssetRow: View {
                 }
 
             // Info
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text(asset.name)
                     .font(.body)
                     .fontWeight(.medium)
@@ -233,7 +233,6 @@ private struct ViewerAssetRow: View {
                     if let gaussianCount = asset.formattedGaussianCount {
                         Label(gaussianCount, systemImage: "circle.grid.3x3")
                     }
-                    Label(asset.formattedFileSize, systemImage: "doc")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

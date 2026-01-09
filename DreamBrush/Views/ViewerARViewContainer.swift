@@ -557,7 +557,7 @@ final class ViewerARContainerView: UIView {
         cameraFeedVisible = isVisible
 
         arView.alpha = isVisible ? 1 : 0
-        arView.isHidden = false
+        arView.isHidden = !isVisible
 
         backgroundColor = isVisible ? .clear : .black
         metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
