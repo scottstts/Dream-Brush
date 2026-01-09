@@ -99,7 +99,6 @@ def load_frame_metadata(meta_path: Path) -> dict:
 
 def filter_frames(
     frames: list[tuple[int, Path, Path, Optional[Path]]],
-    bundle_path: Path,
     max_angular_velocity: float = 120.0,
     max_exposure_duration: float = 0.05,
     max_upright_deviation: float = 20.0,
@@ -224,6 +223,9 @@ def run_inference(
     checkpoint_path: Optional[Path] = None,
     device_str: str = "default",
     skip_existing: bool = True,
+    max_angular_velocity: float = 120.0,
+    max_exposure_duration: float = 0.05,
+    max_upright_deviation: float = 20.0,
 ):
     """
     Run SHARP inference on all frames in a capture bundle.
@@ -240,7 +242,12 @@ def run_inference(
     
     # Get and filter frames
     frames = get_frame_list(bundle_path)
-    filtered_frames = filter_frames(frames, bundle_path)
+    filtered_frames = filter_frames(
+        frames,
+        max_angular_velocity=max_angular_velocity,
+        max_exposure_duration=max_exposure_duration,
+        max_upright_deviation=max_upright_deviation,
+    )
     
     if len(filtered_frames) == 0:
         LOGGER.error("No frames passed filtering. Exiting.")
@@ -361,6 +368,24 @@ def main():
         help="Re-process frames even if output PLY already exists",
     )
     parser.add_argument(
+        "--max-angular-velocity",
+        type=float,
+        default=120.0,
+        help="Max angular velocity in deg/sec to accept frame (default: 120.0)",
+    )
+    parser.add_argument(
+        "--max-exposure",
+        type=float,
+        default=0.05,
+        help="Max exposure duration in seconds to accept frame (default: 0.05)",
+    )
+    parser.add_argument(
+        "--max-upright-deviation",
+        type=float,
+        default=20.0,
+        help="Max upright deviation in degrees to accept frame (default: 20.0)",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable debug logging",
@@ -387,6 +412,9 @@ def main():
         checkpoint_path=args.checkpoint,
         device_str=args.device,
         skip_existing=not args.no_skip,
+        max_angular_velocity=args.max_angular_velocity,
+        max_exposure_duration=args.max_exposure,
+        max_upright_deviation=args.max_upright_deviation,
     )
 
 
