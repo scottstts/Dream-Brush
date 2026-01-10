@@ -18,7 +18,7 @@ frame_filter:
 
 merge:
   voxel_size_m: 0.05           # Voxel grid size for deduplication (smaller = more detail, larger file)
-  depth_prune: true            # Enable depth-based pruning (removes splats that disagree with LiDAR)
-  depth_threshold_m: 0.15      # Max depth disagreement in meters (only used if depth_prune is true)
+  depth_pruning: false         # Enable depth-based pruning (removes splats that disagree with LiDAR)
+  depth_threshold_m: 0.5       # Max depth disagreement in meters (only used if depth_pruning is true)
   min_opacity_logit: -3.0      # Minimum opacity to keep (more negative = keep more transparent splats)
   max_scale_log: 2.0           # Maximum scale to keep (higher = keep larger splats)

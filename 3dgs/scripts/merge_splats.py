@@ -39,6 +39,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 LOGGER = logging.getLogger(__name__)
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config" / "defaults.yaml"
 
 
 # =============================================================================
@@ -242,6 +243,24 @@ def load_frame_metadata(meta_path: Path) -> dict:
         return json.load(f)
 
 
+def load_defaults(config_path: Path) -> dict:
+    """Load defaults from YAML config. Returns empty dict on failure."""
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+    except Exception as exc:
+        LOGGER.warning(f"Config load skipped (PyYAML unavailable): {exc}")
+        return {}
+    try:
+        with open(config_path, "r") as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        LOGGER.warning(f"Config load failed: {exc}")
+        return {}
+
+
 def matrix_from_list(mat_list: list[list[float]]) -> np.ndarray:
     """Convert a row-major 4x4 matrix list to numpy array."""
     return np.array(mat_list, dtype=np.float32)
@@ -416,7 +435,7 @@ def prune_by_depth(
     depth_map: np.ndarray,
     depth_intrinsics: np.ndarray,
     T_c2w: np.ndarray,
-    depth_threshold: float = 0.15,
+    depth_threshold: float = 0.5,
 ) -> GaussianCloud:
     """
     Remove splats that significantly disagree with the depth map.
@@ -445,30 +464,51 @@ def prune_by_depth(
     fx, fy = depth_intrinsics[0, 0], depth_intrinsics[1, 1]
     cx, cy = depth_intrinsics[0, 2], depth_intrinsics[1, 2]
     
-    # Depth camera might be in OpenCV convention (z forward)
-    z = positions_cam[:, 2]
+    # Depth intrinsics + depth map use OpenCV-style coords (z forward).
+    # ARKit camera coords are x right, y up, z backward (toward viewer),
+    # so flip y and z to compare in the same space.
     x = positions_cam[:, 0]
-    y = positions_cam[:, 1]
+    y = -positions_cam[:, 1]
+    z = -positions_cam[:, 2]
     
     # Project to pixel coordinates
-    u = (fx * x / z + cx).astype(np.int32)
-    v = (fy * y / z + cy).astype(np.int32)
+    u = np.rint(fx * x / z + cx).astype(np.int32)
+    v = np.rint(fy * y / z + cy).astype(np.int32)
     
     # Create mask for valid projections
-    valid_proj = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (z > 0)
+    valid_proj = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (z > 1e-6)
     
-    # Check depth agreement
+    # Compare against range (distance along the ray), not just z.
     keep_mask = np.ones(cloud.count, dtype=bool)
     valid_indices = np.where(valid_proj)[0]
+    if len(valid_indices) == 0:
+        return cloud
     
-    for idx in valid_indices:
-        measured_depth = depth_map[v[idx], u[idx]]
-        if np.isnan(measured_depth):
-            continue
-        
-        splat_depth = z[idx]
-        if abs(splat_depth - measured_depth) > depth_threshold:
-            keep_mask[idx] = False
+    measured_depth = depth_map[v[valid_indices], u[valid_indices]]
+    finite = np.isfinite(measured_depth)
+    if np.count_nonzero(finite) < 1500:
+        LOGGER.debug("Depth pruning skipped: insufficient finite depth samples")
+        return cloud
+    
+    pred_range = np.sqrt(
+        x[valid_indices] ** 2 +
+        y[valid_indices] ** 2 +
+        z[valid_indices] ** 2
+    )
+    
+    # Adaptive threshold: base + proportional-to-range term.
+    adaptive_thresh = depth_threshold + 0.2 * measured_depth
+    diff = np.abs(pred_range - measured_depth)
+    
+    keep_mask_valid = np.ones_like(measured_depth, dtype=bool)
+    keep_mask_valid[finite] = diff[finite] <= adaptive_thresh[finite]
+    
+    inlier_ratio = np.mean(keep_mask_valid[finite])
+    if inlier_ratio < 0.5:
+        LOGGER.debug(f"Depth pruning skipped: low inlier ratio ({inlier_ratio:.2f})")
+        return cloud
+    
+    keep_mask[valid_indices] = keep_mask_valid
     
     pruned_count = cloud.count - np.sum(keep_mask)
     LOGGER.debug(f"Depth pruning: removed {pruned_count}/{cloud.count} splats")
@@ -570,7 +610,7 @@ def merge_pipeline(
     output_path: Path,
     voxel_size: float = 0.03,
     depth_prune: bool = True,
-    depth_threshold: float = 0.15,
+    depth_threshold: float = 0.5,
     min_opacity_logit: float = -2.0,
     max_scale_log: float = 1.0,
 ):
@@ -719,6 +759,13 @@ def merge_pipeline(
 
 
 def main():
+    defaults = load_defaults(DEFAULT_CONFIG_PATH)
+    merge_defaults = defaults.get("merge", {}) if isinstance(defaults, dict) else {}
+    depth_pruning_default = merge_defaults.get(
+        "depth_pruning",
+        merge_defaults.get("depth_prune", True),
+    )
+
     parser = argparse.ArgumentParser(
         description="Merge per-frame PLY files into a single coherent 3DGS PLY"
     )
@@ -746,16 +793,25 @@ def main():
         default=0.03,
         help="Voxel size for deduplication in meters (default: 0.03)",
     )
-    parser.add_argument(
-        "--no-depth-prune",
+    depth_prune_group = parser.add_mutually_exclusive_group()
+    depth_prune_group.add_argument(
+        "--depth-prune",
+        dest="depth_prune",
         action="store_true",
+        default=depth_pruning_default,
+        help="Enable depth-aware pruning",
+    )
+    depth_prune_group.add_argument(
+        "--no-depth-prune",
+        dest="depth_prune",
+        action="store_false",
         help="Disable depth-aware pruning",
     )
     parser.add_argument(
         "--depth-threshold",
         type=float,
-        default=0.15,
-        help="Depth agreement threshold in meters (default: 0.15)",
+        default=0.5,
+        help="Depth agreement threshold in meters (default: 0.5)",
     )
     parser.add_argument(
         "--min-opacity",
@@ -799,7 +855,7 @@ def main():
         ply_dir=args.ply_dir,
         output_path=args.output,
         voxel_size=args.voxel_size,
-        depth_prune=not args.no_depth_prune,
+        depth_prune=args.depth_prune,
         depth_threshold=args.depth_threshold,
         min_opacity_logit=args.min_opacity,
         max_scale_log=args.max_scale,
