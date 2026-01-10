@@ -169,7 +169,10 @@ def load_predictor(checkpoint_path: Optional[Path], device: torch.device):
 def predict_image(
     predictor,
     image: np.ndarray,
-    f_px: float,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
     device: torch.device,
 ) -> Gaussians3D:
     """
@@ -182,7 +185,7 @@ def predict_image(
     # Preprocess image
     image_pt = torch.from_numpy(image.copy()).float().to(device).permute(2, 0, 1) / 255.0
     _, height, width = image_pt.shape
-    disparity_factor = torch.tensor([f_px / width]).float().to(device)
+    disparity_factor = torch.tensor([fx / width]).float().to(device)
     
     image_resized_pt = F.interpolate(
         image_pt[None],
@@ -197,8 +200,8 @@ def predict_image(
     # Build intrinsics matrix
     intrinsics = (
         torch.tensor([
-            [f_px, 0, width / 2, 0],
-            [0, f_px, height / 2, 0],
+            [fx, 0, cx, 0],
+            [0, fy, cy, 0],
             [0, 0, 1, 0],
             [0, 0, 0, 1],
         ])
@@ -301,18 +304,35 @@ def run_inference(
         # Use intrinsics from metadata if available
         camera_meta = meta.get("camera", {})
         intrinsics = camera_meta.get("intrinsics", [])
-        if intrinsics and len(intrinsics) >= 2:
+        if (
+            isinstance(intrinsics, list)
+            and len(intrinsics) >= 3
+            and all(isinstance(row, list) and len(row) >= 3 for row in intrinsics[:3])
+        ):
             # intrinsics is 3x3 row-major: [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
-            f_px = intrinsics[0][0]  # fx
+            fx = float(intrinsics[0][0])
+            fy = float(intrinsics[1][1])
+            cx = float(intrinsics[0][2])
+            cy = float(intrinsics[1][2])
         else:
-            f_px = f_px_default
-            LOGGER.warning(f"Frame {frame_idx}: using default focal length {f_px}")
+            fx = f_px_default
+            fy = f_px_default
+            cx = width / 2
+            cy = height / 2
+            LOGGER.warning(
+                "Frame %d: using default intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
+                frame_idx,
+                fx,
+                fy,
+                cx,
+                cy,
+            )
         
         # Run inference
-        gaussians = predict_image(predictor, image, f_px, device)
+        gaussians = predict_image(predictor, image, fx, fy, cx, cy, device)
         
         # Save PLY
-        save_ply(gaussians, f_px, (height, width), output_ply)
+        save_ply(gaussians, fx, (height, width), output_ply)
         LOGGER.info(f"  Saved: {output_ply}")
         
         # Track in summary
@@ -320,7 +340,12 @@ def run_inference(
             "frame_index": frame_idx,
             "ply_path": str(output_ply),
             "image_size": [width, height],
-            "focal_length": f_px,
+            "focal_length": fx,
+            "intrinsics": [
+                [fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0],
+            ],
             "skipped": False,
         })
     
