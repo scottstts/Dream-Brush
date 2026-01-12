@@ -1,3 +1,5 @@
-# Dream Brush Dev Repo
+# Dream Brush
 
-in progress
+Scan your surroundings and create a 3DGS from it.
+
+![screenshot](3dgs/screenshot.jpeg)
